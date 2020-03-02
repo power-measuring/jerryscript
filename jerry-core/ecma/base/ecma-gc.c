@@ -17,6 +17,8 @@
  * Garbage collector implementation
  */
 
+#define _GNU_SOURCE         /* See feature_test_macros(7) */
+#include <unistd.h>
 #include "ecma-alloc.h"
 #include "ecma-globals.h"
 #include "ecma-gc.h"
@@ -29,6 +31,9 @@
 #include "re-compiler.h"
 #include "vm-defines.h"
 #include "vm-stack.h"
+#include <time.h>
+#include "myinst.h"
+
 
 #if ENABLED (JERRY_ES2015_BUILTIN_TYPEDARRAY)
 #include "ecma-typedarray-object.h"
@@ -812,6 +817,7 @@ ecma_gc_free_object (ecma_object_t *object_p) /**< object to free */
 void
 ecma_gc_run (jmem_free_unused_memory_severity_t severity) /**< gc severity */
 {
+  myinst(1, 1); //flag 1 -> whole gc start
   JERRY_CONTEXT (ecma_gc_new_objects) = 0;
 
   ecma_object_t *white_gray_objects_p = JERRY_CONTEXT (ecma_gc_objects_p);
@@ -820,6 +826,7 @@ ecma_gc_run (jmem_free_unused_memory_severity_t severity) /**< gc severity */
   ecma_object_t *obj_iter_p = white_gray_objects_p;
   ecma_object_t *obj_prev_p = NULL;
 
+  myinst(2, 1); //flag 2 -> the stage of mark start
   /* Move root objects (i.e. they have global or stack references) to the black list. */
   while (obj_iter_p != NULL)
   {
@@ -905,7 +912,9 @@ ecma_gc_run (jmem_free_unused_memory_severity_t severity) /**< gc severity */
     }
   }
   while (marked_anything_during_current_iteration);
+  myinst(2, 0); //flag 2 -> stage mark root objects done
 
+  myinst(3, 1); //flag 3 -> stage sweep start
   /* Sweep objects that are currently unmarked. */
   obj_iter_p = white_gray_objects_p;
 
@@ -951,6 +960,7 @@ ecma_gc_run (jmem_free_unused_memory_severity_t severity) /**< gc severity */
       obj_iter_p = ecma_gc_get_object_next (obj_iter_p);
     }
   }
+  myinst(3, 0); //flag 3 -> stage sweep over
 
   JERRY_CONTEXT (ecma_gc_objects_p) = black_objects_p;
 
@@ -958,6 +968,8 @@ ecma_gc_run (jmem_free_unused_memory_severity_t severity) /**< gc severity */
   /* Free RegExp bytecodes stored in cache */
   re_cache_gc_run ();
 #endif /* ENABLED (JERRY_BUILTIN_REGEXP) */
+
+  myinst(1, 0); //flag 0 -> whole gc over
 } /* ecma_gc_run */
 
 /**
