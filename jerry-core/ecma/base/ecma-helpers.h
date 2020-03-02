@@ -347,6 +347,15 @@ ecma_create_named_data_property (ecma_object_t *object_p, ecma_string_t *name_p,
 ecma_property_value_t *
 ecma_create_named_accessor_property (ecma_object_t *object_p, ecma_string_t *name_p, ecma_object_t *get_p,
                                      ecma_object_t *set_p, uint8_t prop_attributes, ecma_property_t **out_prop_p);
+
+int ecma_find_named_property_lcache(ecma_object_t *obj_p,
+                                    ecma_string_t *name_p, ecma_property_t ** property_p);
+int ecma_find_named_property_hashmap(ecma_object_t *obj_p,
+                                    ecma_string_t *name_p, ecma_property_t ** property_p);
+int ecma_find_named_property_list(ecma_object_t *obj_p,
+                                    ecma_string_t *name_p, ecma_property_t ** property_p);
+
+
 ecma_property_t *
 ecma_find_named_property (ecma_object_t *obj_p, ecma_string_t *name_p);
 ecma_property_value_t *

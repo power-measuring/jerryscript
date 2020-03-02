@@ -24,6 +24,7 @@
 #include "byte-code.h"
 #include "re-compiler.h"
 #include "ecma-builtins.h"
+#include "myinst.h"
 
 #ifdef JERRY_DEBUGGER
 #include "debugger.h"
@@ -584,47 +585,55 @@ ecma_create_named_accessor_property (ecma_object_t *object_p, /**< object */
  * @return pointer to the property, if it is found,
  *         NULL - otherwise.
  */
-ecma_property_t *
-ecma_find_named_property (ecma_object_t *obj_p, /**< object to find property in */
-                          ecma_string_t *name_p) /**< property's name */
+
+int ecma_find_named_property_lcache(ecma_object_t *obj_p,
+                                    ecma_string_t *name_p, ecma_property_t ** property_p)
 {
-  JERRY_ASSERT (obj_p != NULL);
-  JERRY_ASSERT (name_p != NULL);
-
-  ecma_property_t *property_p = NULL;
-
 #ifndef CONFIG_ECMA_LCACHE_DISABLE
-  property_p = ecma_lcache_lookup (obj_p, name_p);
-  if (property_p != NULL)
+  *property_p = ecma_lcache_lookup (obj_p, name_p);
+  if (*property_p != NULL)
   {
-    return property_p;
+    return 1;
   }
 #endif /* !CONFIG_ECMA_LCACHE_DISABLE */
+  return 0;
+    
+}
 
-  ecma_property_header_t *prop_iter_p = ecma_get_property_list (obj_p);
+int ecma_find_named_property_hashmap(ecma_object_t *obj_p,
+                                    ecma_string_t *name_p, ecma_property_t ** property_p)
+{
+    ecma_property_header_t *prop_iter_p = ecma_get_property_list (obj_p);
 
 #ifndef CONFIG_ECMA_PROPERTY_HASHMAP_DISABLE
   if (prop_iter_p != NULL && prop_iter_p->types[0] == ECMA_PROPERTY_TYPE_HASHMAP)
   {
     jmem_cpointer_t property_real_name_cp;
-    property_p = ecma_property_hashmap_find ((ecma_property_hashmap_t *) prop_iter_p,
+    *property_p = ecma_property_hashmap_find ((ecma_property_hashmap_t *) prop_iter_p,
                                              name_p,
                                              &property_real_name_cp);
 
 #ifndef CONFIG_ECMA_LCACHE_DISABLE
-    if (property_p != NULL
-        && !ecma_is_property_lcached (property_p))
+    if (*property_p != NULL
+        && !ecma_is_property_lcached ((*property_p)))
     {
-      ecma_lcache_insert (obj_p, property_real_name_cp, property_p);
+      ecma_lcache_insert (obj_p, property_real_name_cp, *property_p);
     }
 #endif /* !CONFIG_ECMA_LCACHE_DISABLE */
-
-    return property_p;
+    return 1;
   }
 #endif /* !CONFIG_ECMA_PROPERTY_HASHMAP_DISABLE */
+    return 0;
+}
 
+int ecma_find_named_property_list(ecma_object_t *obj_p,
+                                    ecma_string_t *name_p, ecma_property_t ** property_p)
+{
   JERRY_ASSERT (ECMA_PROPERTY_PAIR_ITEM_COUNT == 2);
+  JERRY_ASSERT (obj_p != NULL);
+  JERRY_ASSERT (name_p != NULL);
 
+  ecma_property_header_t *prop_iter_p = ecma_get_property_list (obj_p);
   uint32_t steps = 0;
   jmem_cpointer_t property_name_cp = ECMA_NULL_POINTER;
 
@@ -646,7 +655,7 @@ ecma_find_named_property (ecma_object_t *obj_p, /**< object to find property in 
       {
         JERRY_ASSERT (ECMA_PROPERTY_IS_NAMED_PROPERTY (prop_iter_p->types[0]));
 
-        property_p = prop_iter_p->types + 0;
+        *property_p = prop_iter_p->types + 0;
         break;
       }
 
@@ -655,7 +664,7 @@ ecma_find_named_property (ecma_object_t *obj_p, /**< object to find property in 
       {
         JERRY_ASSERT (ECMA_PROPERTY_IS_NAMED_PROPERTY (prop_iter_p->types[1]));
 
-        property_p = prop_iter_p->types + 1;
+        *property_p = prop_iter_p->types + 1;
         break;
       }
 
@@ -680,7 +689,7 @@ ecma_find_named_property (ecma_object_t *obj_p, /**< object to find property in 
 
         if (ecma_compare_ecma_non_direct_strings (name_p, prop_name_p))
         {
-          property_p = prop_iter_p->types + 0;
+          *property_p = prop_iter_p->types + 0;
           break;
         }
       }
@@ -692,7 +701,7 @@ ecma_find_named_property (ecma_object_t *obj_p, /**< object to find property in 
 
         if (ecma_compare_ecma_non_direct_strings (name_p, prop_name_p))
         {
-          property_p = prop_iter_p->types + 1;
+          *property_p = prop_iter_p->types + 1;
           break;
         }
       }
@@ -710,15 +719,67 @@ ecma_find_named_property (ecma_object_t *obj_p, /**< object to find property in 
   }
 
 #ifndef CONFIG_ECMA_LCACHE_DISABLE
-  if (property_p != NULL
-      && !ecma_is_property_lcached (property_p))
+  if (*property_p != NULL
+      && !ecma_is_property_lcached ((*property_p)))
   {
-    ecma_lcache_insert (obj_p, property_name_cp, property_p);
+    ecma_lcache_insert (obj_p, property_name_cp, *property_p);
   }
 #endif /* !CONFIG_ECMA_LCACHE_DISABLE */
 
+  return 1;
+
+}
+
+//int times_total = 0;
+//int times_cache = 0;
+//int times_hashtable = 0;
+//int times_linear = 0;
+
+ecma_property_t *
+ecma_find_named_property (ecma_object_t *obj_p, /**< object to find property in */
+                          ecma_string_t *name_p) /**< property's name */
+{
+  myinst(4, 1); //Invoking our own system call
+  //times_total += 1;
+//  clock_t begin = clock();
+  JERRY_ASSERT (obj_p != NULL);
+  JERRY_ASSERT (name_p != NULL);
+
+  ecma_property_t *property_p = NULL;
+
+  myinst(5, 1);
+  int exit = ecma_find_named_property_lcache(obj_p, name_p, &property_p);
+  if(exit) {
+      //times_cache += 1;
+      myinst(5, 0);
+      myinst(4, 0);
+      return property_p;
+  }
+  myinst(5, 0);
+  
+  myinst(6, 1);
+  exit = ecma_find_named_property_hashmap(obj_p, name_p, &property_p);
+  if(exit) {
+      //times_hashtable += 1;
+      myinst(6, 0);
+      myinst(4, 0);
+      return property_p;
+  }
+  myinst(6, 0);
+  
+  myinst(7, 1);
+  exit = ecma_find_named_property_list(obj_p, name_p, &property_p);
+  myinst(7, 0);
+  
+  myinst(4, 0);
+  //times_linear += 1;
+  //printf("total: %d ", times_total);
+  //printf("cache: %d ", times_cache);
+  //printf("hashtable: %d ", times_hashtable);
+  //printf("linear: %d\n", times_linear);
   return property_p;
 } /* ecma_find_named_property */
+
 
 /**
  * Get named data property or named access property in specified object.
