@@ -34,6 +34,7 @@
 #include "opcodes.h"
 #include "vm.h"
 #include "vm-stack.h"
+#include "myinst.h"
 
 /** \addtogroup vm Virtual machine
  * @{
@@ -3400,6 +3401,7 @@ vm_execute (vm_frame_ctx_t *frame_ctx_p, /**< frame context */
             const ecma_value_t *arg_p, /**< arguments list */
             ecma_length_t arg_list_len) /**< length of arguments list */
 {
+  myinst(0, 1); //flag 0
   const ecma_compiled_code_t *bytecode_header_p = frame_ctx_p->bytecode_header_p;
   ecma_value_t completion_value;
   uint16_t argument_end;
@@ -3514,6 +3516,7 @@ vm_execute (vm_frame_ctx_t *frame_ctx_p, /**< frame context */
 #endif /* VM_RECURSION_LIMIT */
 
         JERRY_CONTEXT (vm_top_context_p) = frame_ctx_p->prev_context_p;
+        myinst(0, 0); //flag 0
         return completion_value;
       }
     }
