@@ -12,10 +12,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
+#define _GNU_SOURCE
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 
 #include "jerryscript.h"
 #include "jerryscript-port.h"
@@ -45,7 +46,7 @@ static jerry_char_t literal_buffer[JERRY_BUFFER_SIZE];
 static const char *output_file_name_p = "js.snapshot";
 static jerry_length_t magic_string_lengths[JERRY_LITERAL_LENGTH];
 static const jerry_char_t *magic_string_items[JERRY_LITERAL_LENGTH];
-
+static void sighandler (int signo, siginfo_t *si, void *data);
 /**
  * Check whether JerryScript has a requested feature enabled or not. If not,
  * print a warning message.
@@ -731,6 +732,14 @@ print_commands (char *prog_name_p) /**< program name */
           "  merge\n"
           "\nPassing -h or --help after a command displays its help.\n");
 } /* print_commands */
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+void sighandler (int signo, siginfo_t *si, void *data){
+
+    ucontext_t *uc = (ucontext_t *) data;
+    int myinst_len = 4;
+    uc->uc_mcontext.gregs[REG_RIP] += myinst_len;
+
+}
 
 /**
  * Main function.
@@ -741,6 +750,14 @@ int
 main (int argc, /**< number of arguments */
       char **argv) /**< argument list */
 {
+  struct sigaction sa;
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_flags = SA_RESTART | SA_SIGINFO;
+  #pragma GCC diagnostic ignored "-Wincompatible-pointer-types"
+  sa.sa_sigaction = sighandler;
+  sigaction(SIGILL, &sa, NULL);
+  sigaction(SIGSEGV, &sa, NULL);
+  #pragma GCC diagnostic error "-Wincompatible-pointer-types"
   cli_state_t cli_state = cli_init (main_opts, argc - 1, argv + 1);
 
   for (int id = cli_consume_option (&cli_state); id != CLI_OPT_END; id = cli_consume_option (&cli_state))
