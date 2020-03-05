@@ -27,7 +27,7 @@
  #include "jcontext.h"
  #include "jrt.h"
 
-#if ENABLED (JERRY_ES2015_BUILTIN_SYMBOL)
+#if ENABLED (JERRY_ES2015)
 
 #define ECMA_BUILTINS_INTERNAL
 #include "ecma-builtins-internal.h"
@@ -102,11 +102,14 @@ ecma_builtin_symbol_for_helper (ecma_value_t value_to_find) /**< symbol or ecma-
     string_p = ecma_get_symbol_from_value (value_to_find);
   }
 
-  ecma_lit_storage_item_t *symbol_list_p = JERRY_CONTEXT (symbol_list_first_p);
+  jmem_cpointer_t symbol_list_cp = JERRY_CONTEXT (symbol_list_first_cp);
   jmem_cpointer_t *empty_cpointer_p = NULL;
 
-  while (symbol_list_p != NULL)
+  while (symbol_list_cp != JMEM_CP_NULL)
   {
+    ecma_lit_storage_item_t *symbol_list_p = JMEM_CP_GET_NON_NULL_POINTER (ecma_lit_storage_item_t,
+                                                                           symbol_list_cp);
+
     for (int i = 0; i < ECMA_LIT_STORAGE_VALUE_COUNT; i++)
     {
       if (symbol_list_p->values[i] != JMEM_CP_NULL)
@@ -145,7 +148,7 @@ ecma_builtin_symbol_for_helper (ecma_value_t value_to_find) /**< symbol or ecma-
       }
     }
 
-    symbol_list_p = JMEM_CP_GET_POINTER (ecma_lit_storage_item_t, symbol_list_p->next_cp);
+    symbol_list_cp = symbol_list_p->next_cp;
   }
 
   if (!is_for)
@@ -175,8 +178,8 @@ ecma_builtin_symbol_for_helper (ecma_value_t value_to_find) /**< symbol or ecma-
     new_item_p->values[i] = JMEM_CP_NULL;
   }
 
-  JMEM_CP_SET_POINTER (new_item_p->next_cp, JERRY_CONTEXT (symbol_list_first_p));
-  JERRY_CONTEXT (symbol_list_first_p) = new_item_p;
+  new_item_p->next_cp = JERRY_CONTEXT (symbol_list_first_cp);
+  JMEM_CP_SET_NON_NULL_POINTER (JERRY_CONTEXT (symbol_list_first_cp), new_item_p);
 
   return ecma_copy_value (ecma_make_symbol_value (new_symbol_p));
 } /* ecma_builtin_symbol_for_helper */
@@ -195,18 +198,16 @@ ecma_builtin_symbol_for (ecma_value_t this_arg, /**< this argument */
                          ecma_value_t key) /**< key string */
 {
   JERRY_UNUSED (this_arg);
-  ecma_value_t string_desc = ecma_op_to_string (key);
+  ecma_string_t *string_desc_p = ecma_op_to_string (key);
 
   /* 1. */
-  if (ECMA_IS_VALUE_ERROR (string_desc))
+  if (JERRY_UNLIKELY (string_desc_p == NULL))
   {
     /* 2. */
-    return string_desc;
+    return ECMA_VALUE_ERROR;
   }
-  /* 4-7. */
-  JERRY_ASSERT (ecma_is_value_string (string_desc));
 
-  return ecma_builtin_symbol_for_helper (string_desc);
+  return ecma_builtin_symbol_for_helper (ecma_make_string_value (string_desc_p));
 } /* ecma_builtin_symbol_for */
 
 /**
@@ -240,4 +241,4 @@ ecma_builtin_symbol_key_for (ecma_value_t this_arg, /**< this argument */
  * @}
  */
 
-#endif /* ENABLED (JERRY_ES2015_BUILTIN_SYMBOL) */
+#endif /* ENABLED (JERRY_ES2015) */

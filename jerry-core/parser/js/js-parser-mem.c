@@ -15,7 +15,7 @@
 
 #include "js-parser-internal.h"
 
-#ifndef JERRY_DISABLE_JS_PARSER
+#if ENABLED (JERRY_PARSER)
 
 /** \addtogroup mem Memory allocation
  * @{
@@ -52,8 +52,9 @@ parser_malloc (parser_context_t *context_p, /**< context */
 /**
  * Free memory allocated by parser_malloc.
  */
-void parser_free (void *ptr, /**< pointer to free */
-                  size_t size) /**< size of the memory block */
+inline void JERRY_ATTR_ALWAYS_INLINE
+parser_free (void *ptr, /**< pointer to free */
+             size_t size) /**< size of the memory block */
 {
   jmem_heap_free_block (ptr, size);
 } /* parser_free */
@@ -81,11 +82,26 @@ parser_malloc_local (parser_context_t *context_p, /**< context */
 /**
  * Free memory allocated by parser_malloc_local.
  */
-void parser_free_local (void *ptr, /**< pointer to free */
-                        size_t size) /**< size of the memory */
+void
+parser_free_local (void *ptr, /**< pointer to free */
+                   size_t size) /**< size of the memory */
 {
   jmem_heap_free_block (ptr, size);
 } /* parser_free_local */
+
+/**
+ * Free the dynamically allocated buffer stored in the context
+ */
+inline void JERRY_ATTR_ALWAYS_INLINE
+parser_free_allocated_buffer (parser_context_t *context_p) /**< context */
+{
+  if (context_p->u.allocated_buffer_p != NULL)
+  {
+    parser_free_local (context_p->u.allocated_buffer_p,
+                       context_p->allocated_buffer_size);
+    context_p->u.allocated_buffer_p = NULL;
+  }
+} /* parser_free_allocated_buffer */
 
 /**********************************************************************/
 /* Parser data management functions                                   */
@@ -678,4 +694,4 @@ parser_stack_iterator_write (parser_stack_iterator_t *iterator, /**< iterator */
  * @}
  */
 
-#endif /* !JERRY_DISABLE_JS_PARSER */
+#endif /* ENABLED (JERRY_PARSER) */

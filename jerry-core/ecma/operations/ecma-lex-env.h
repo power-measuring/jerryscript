@@ -30,9 +30,13 @@
  * @{
  */
 
-void ecma_init_global_lex_env (void);
-void ecma_finalize_global_lex_env (void);
+void ecma_init_global_environment (void);
+void ecma_finalize_global_environment (void);
 ecma_object_t *ecma_get_global_environment (void);
+ecma_object_t *ecma_get_global_scope (void);
+#if ENABLED (JERRY_ES2015)
+void ecma_create_global_lexical_block (void);
+#endif /* ENABLED (JERRY_ES2015) */
 
 #if ENABLED (JERRY_ES2015_MODULE_SYSTEM)
 void ecma_module_add_lex_env (ecma_object_t *lex_env_p);
@@ -51,7 +55,7 @@ ecma_value_t ecma_op_put_value_lex_env_base (ecma_object_t *lex_env_p, ecma_stri
                                              bool is_strict, ecma_value_t value);
 
 /* ECMA-262 v5, Table 17. Abstract methods of Environment Records */
-bool ecma_op_has_binding (ecma_object_t *lex_env_p, ecma_string_t *name_p);
+ecma_value_t ecma_op_has_binding (ecma_object_t *lex_env_p, ecma_string_t *name_p);
 ecma_value_t ecma_op_create_mutable_binding (ecma_object_t *lex_env_p, ecma_string_t *name_p, bool is_deletable);
 ecma_value_t ecma_op_set_mutable_binding (ecma_object_t *lex_env_p, ecma_string_t *name_p, ecma_value_t value,
                                           bool is_strict);

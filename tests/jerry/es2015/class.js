@@ -56,6 +56,7 @@ must_throw("class X {}; var o = {}; Object.defineProperty(o, 'p', { get: X, set:
 must_throw("var a = new A; class A {};");
 must_throw("class A { g\\u0065t e() {} }");
 must_throw('class A { "static" e() {} }');
+must_throw('class A { *constructor() {} }');
 
 assert(eval("class A {}") === undefined);
 assert(eval("var a = class A {}") === undefined);
@@ -63,6 +64,22 @@ assert(eval("var a = class {}") === undefined);
 assert(eval("class A { ; ; ; ;;;;;;;;;;;; ; ; ;;;;;;;;;;;;;;;;;;;;;;;;; }") === undefined);
 assert(eval('class A {"constructor"() {} }') === undefined);
 assert(isNaN (eval('switch(1) { default: (class A{} % 1) }')));
+
+class A1 {
+  ["constructor"]() {
+    return 5;
+  }
+}
+
+assert ((new A1).constructor() === 5);
+
+class A2 {
+  *["constructor"]() {
+    yield 5;
+  }
+}
+
+assert ((new A2).constructor().next().value === 5);
 
 class B {
 }
@@ -83,13 +100,27 @@ class C {
   3() {
     return 3;
   }
+
+  super() {
+    return 42;
+  }
+  return() {
+    return 43;
+  }
+
+  static *constructor() {
+    return 44;
+  }
 }
 
 var c = new C;
 assert (c.c1() === 5);
 assert (c.c2() === undefined);
 assert (c["3"]() === 3);
+assert (c.super() === 42);
+assert (c.return() === 43);
 assert (c.constructor === C);
+assert (C.constructor().next().value === 44);
 
 class D {
   constructor(d) {
@@ -116,11 +147,21 @@ class E {
   set e(e) {
     this._e = e;
   }
+
+  get () {
+    return 11;
+  }
+
+  set () {
+    return 12;
+  }
 }
 var e = new E (5);
 assert (e.e === 5);
 e.e = 10;
 assert (e.e === 10);
+assert (e.get() === 11);
+assert (e.set() === 12);
 assert (e.constructor === E);
 
 var F = class ClassF {
@@ -151,6 +192,10 @@ var F = class ClassF {
   static 2 (a) {
     return 2 * a;
   }
+
+  static function(a) {
+    return 3 * a;
+  }
 }
 
 var f = new F(5);
@@ -163,6 +208,7 @@ assert (F.f3(1, 1) === 2);
 assert (F.constructor(5) === 5);
 assert (F.static(5) === 5);
 assert (F["2"](5) === 10);
+assert (F.function(5) === 15);
 assert (f.constructor === F);
 
 var G = class {
@@ -177,6 +223,14 @@ var G = class {
   }
   static get 1() {
     return this._a;
+  }
+
+  static get() {
+    return 11;
+  }
+
+  static set() {
+    return 12;
   }
 
   static set constructor(a) {
@@ -200,5 +254,7 @@ assert (G.a === 10);
 assert (G.g1() === 10);
 G["1"] = 20;
 assert (G["1"] === 20);
+assert (G.get() == 11);
+assert (G.set() == 12);
 G.constructor = 30;
 assert (G.constructor === 30);

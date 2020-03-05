@@ -79,7 +79,7 @@ ecma_op_eval_chars_buffer (const lit_utf8_byte_t *code_p, /**< code characters b
                            size_t code_buffer_size, /**< size of the buffer */
                            uint32_t parse_opts) /**< ecma_parse_opts_t option bits */
 {
-#ifndef JERRY_DISABLE_JS_PARSER
+#if ENABLED (JERRY_PARSER)
   JERRY_ASSERT (code_p != NULL);
 
   ecma_compiled_code_t *bytecode_data_p;
@@ -91,15 +91,22 @@ ecma_op_eval_chars_buffer (const lit_utf8_byte_t *code_p, /**< code characters b
     parse_opts &= (uint32_t) ~ECMA_PARSE_STRICT_MODE;
   }
 
-#ifdef JERRY_ENABLE_LINE_INFO
-  JERRY_CONTEXT (resource_name) = ecma_make_magic_string_value (LIT_MAGIC_STRING__EMPTY);
-#endif /* JERRY_ENABLE_LINE_INFO */
+  parse_opts |= ECMA_PARSE_EVAL;
 
-#if ENABLED (JERRY_ES2015_CLASS)
-  parse_opts |= ECMA_GET_SUPER_EVAL_PARSER_OPTS ();
+#if ENABLED (JERRY_LINE_INFO) || ENABLED (JERRY_ERROR_MESSAGES)
+  JERRY_CONTEXT (resource_name) = ecma_make_magic_string_value (LIT_MAGIC_STRING_RESOURCE_EVAL);
+#endif /* ENABLED (JERRY_LINE_INFO) || ENABLED (JERRY_ERROR_MESSAGES) */
 
+#if ENABLED (JERRY_ES2015)
   ECMA_CLEAR_SUPER_EVAL_PARSER_OPTS ();
-#endif /* ENABLED (JERRY_ES2015_CLASS) */
+
+  /* If a direct eval is used inside the function the info should be propagated. */
+  if (JERRY_CONTEXT (current_new_target) != JERRY_CONTEXT_INVALID_NEW_TARGET
+      && (JERRY_CONTEXT (status_flags) & ECMA_STATUS_DIRECT_EVAL))
+  {
+    parse_opts |= ECMA_PARSE_CALLED_FROM_FUNCTION;
+  }
+#endif /* ENABLED (JERRY_ES2015) */
 
   ecma_value_t parse_status = parser_parse_script (NULL,
                                                    0,
@@ -114,13 +121,13 @@ ecma_op_eval_chars_buffer (const lit_utf8_byte_t *code_p, /**< code characters b
   }
 
   return vm_run_eval (bytecode_data_p, parse_opts);
-#else /* JERRY_DISABLE_JS_PARSER */
+#else /* !ENABLED (JERRY_PARSER) */
   JERRY_UNUSED (code_p);
   JERRY_UNUSED (code_buffer_size);
   JERRY_UNUSED (parse_opts);
 
   return ecma_raise_syntax_error (ECMA_ERR_MSG ("The parser has been disabled."));
-#endif /* !JERRY_DISABLE_JS_PARSER */
+#endif /* ENABLED (JERRY_PARSER) */
 } /* ecma_op_eval_chars_buffer */
 
 /**

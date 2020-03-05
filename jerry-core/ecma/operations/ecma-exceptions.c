@@ -25,9 +25,9 @@
 #include "jcontext.h"
 #include "jrt.h"
 
-#ifdef JERRY_ENABLE_LINE_INFO
+#if ENABLED (JERRY_LINE_INFO)
 #include "vm.h"
-#endif /* JERRY_ENABLE_LINE_INFO */
+#endif /* ENABLED (JERRY_LINE_INFO) */
 
 /** \addtogroup ecma ECMA
  * @{
@@ -140,7 +140,7 @@ ecma_new_standard_error (ecma_standard_error_t error_type) /**< native error typ
 
   ((ecma_extended_object_t *) new_error_obj_p)->u.class_prop.class_id = LIT_MAGIC_STRING_ERROR_UL;
 
-#ifdef JERRY_ENABLE_LINE_INFO
+#if ENABLED (JERRY_LINE_INFO)
   /* The "stack" identifier is not a magic string. */
   const char * const stack_id_p = "stack";
 
@@ -156,7 +156,7 @@ ecma_new_standard_error (ecma_standard_error_t error_type) /**< native error typ
 
   prop_value_p->value = backtrace_value;
   ecma_deref_object (ecma_get_object_from_value (backtrace_value));
-#endif /* JERRY_ENABLE_LINE_INFO */
+#endif /* ENABLED (JERRY_LINE_INFO) */
 
   return new_error_obj_p;
 } /* ecma_new_standard_error */
@@ -170,17 +170,20 @@ ecma_new_standard_error (ecma_standard_error_t error_type) /**< native error typ
 ecma_standard_error_t
 ecma_get_error_type (ecma_object_t *error_object) /**< possible error object */
 {
-  ecma_object_t *prototype_p = ecma_get_object_prototype (error_object);
-  if (prototype_p != NULL)
+  if (error_object->u2.prototype_cp == JMEM_CP_NULL)
   {
-    uint8_t builtin_id = ecma_get_object_builtin_id (prototype_p);
+    return ECMA_ERROR_NONE;
+  }
 
-    for (uint8_t idx = 0; idx < sizeof (ecma_error_mappings) / sizeof (ecma_error_mappings[0]); idx++)
+  ecma_object_t *prototype_p = ECMA_GET_NON_NULL_POINTER (ecma_object_t, error_object->u2.prototype_cp);
+
+  uint8_t builtin_id = ecma_get_object_builtin_id (prototype_p);
+
+  for (uint8_t idx = 0; idx < sizeof (ecma_error_mappings) / sizeof (ecma_error_mappings[0]); idx++)
+  {
+    if (ecma_error_mappings[idx].error_prototype_id == builtin_id)
     {
-      if (ecma_error_mappings[idx].error_prototype_id == builtin_id)
-      {
-        return ecma_error_mappings[idx].error_type;
-      }
+      return ecma_error_mappings[idx].error_type;
     }
   }
 
@@ -235,12 +238,11 @@ ecma_raise_standard_error (ecma_standard_error_t error_type, /**< error type */
     error_obj_p = ecma_new_standard_error (error_type);
   }
 
-  JERRY_CONTEXT (error_value) = ecma_make_object_value (error_obj_p);
-  JERRY_CONTEXT (status_flags) |= ECMA_STATUS_EXCEPTION;
+  jcontext_raise_exception (ecma_make_object_value (error_obj_p));
   return ECMA_VALUE_ERROR;
 } /* ecma_raise_standard_error */
 
-#ifdef JERRY_ENABLE_ERROR_MESSAGES
+#if ENABLED (JERRY_ERROR_MESSAGES)
 
 /**
  * Raise a standard ecma-error with the given format string and arguments.
@@ -290,17 +292,17 @@ ecma_raise_standard_error_with_format (ecma_standard_error_t error_type, /**< er
         lit_magic_string_id_t class_name = ecma_object_get_class_name (arg_object_p);
         arg_string_p = ecma_get_magic_string (class_name);
       }
-#if ENABLED (JERRY_ES2015_BUILTIN_SYMBOL)
+#if ENABLED (JERRY_ES2015)
       else if (ecma_is_value_symbol (arg_val))
       {
         ecma_value_t symbol_desc_value = ecma_get_symbol_descriptive_string (arg_val);
         arg_string_p = ecma_get_string_from_value (symbol_desc_value);
       }
-#endif /* ENABLED (JERRY_ES2015_BUILTIN_SYMBOL) */
+#endif /* ENABLED (JERRY_ES2015) */
       else
       {
-        ecma_value_t str_val = ecma_op_to_string (arg_val);
-        arg_string_p = ecma_get_string_from_value (str_val);
+        arg_string_p = ecma_op_to_string (arg_val);
+        JERRY_ASSERT (arg_string_p != NULL);
       }
 
       /* Concat argument. */
@@ -330,12 +332,11 @@ ecma_raise_standard_error_with_format (ecma_standard_error_t error_type, /**< er
   ecma_object_t *error_obj_p = ecma_new_standard_error_with_message (error_type, error_msg_p);
   ecma_deref_ecma_string (error_msg_p);
 
-  JERRY_CONTEXT (error_value) = ecma_make_object_value (error_obj_p);
-  JERRY_CONTEXT (status_flags) |= ECMA_STATUS_EXCEPTION;
+  jcontext_raise_exception (ecma_make_object_value (error_obj_p));
   return ECMA_VALUE_ERROR;
 } /* ecma_raise_standard_error_with_format */
 
-#endif /* JERRY_ENABLE_ERROR_MESSAGES */
+#endif /* ENABLED (JERRY_ERROR_MESSAGES) */
 
 /**
  * Raise a common error with the given message.

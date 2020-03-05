@@ -16,6 +16,7 @@
 #include "ecma-array-object.h"
 #include "ecma-helpers.h"
 #include "jcontext.h"
+#include "lit-char-helpers.h"
 #include "vm.h"
 
 /**
@@ -60,7 +61,7 @@ vm_is_direct_eval_form_call (void)
 ecma_value_t
 vm_get_backtrace (uint32_t max_depth) /**< maximum backtrace depth, 0 = unlimited */
 {
-#ifdef JERRY_ENABLE_LINE_INFO
+#if ENABLED (JERRY_LINE_INFO)
   ecma_value_t result_array = ecma_op_create_array_object (NULL, 0, false);
 
   if (max_depth == 0)
@@ -70,6 +71,7 @@ vm_get_backtrace (uint32_t max_depth) /**< maximum backtrace depth, 0 = unlimite
 
   vm_frame_ctx_t *context_p = JERRY_CONTEXT (vm_top_context_p);
   ecma_object_t *array_p = ecma_get_object_from_value (result_array);
+  JERRY_ASSERT (ecma_op_object_is_fast_array (array_p));
   uint32_t index = 0;
 
   while (context_p != NULL)
@@ -81,31 +83,25 @@ vm_get_backtrace (uint32_t max_depth) /**< maximum backtrace depth, 0 = unlimite
     }
 
     ecma_string_t *str_p = ecma_get_string_from_value (context_p->resource_name);
+    ecma_stringbuilder_t builder = ecma_stringbuilder_create ();
 
     if (ecma_string_is_empty (str_p))
     {
-      const lit_utf8_byte_t unknown_str[] = "<unknown>:";
-      str_p = ecma_new_ecma_string_from_utf8 (unknown_str, sizeof (unknown_str) - 1);
+      ecma_stringbuilder_append_raw (&builder, (const lit_utf8_byte_t *)"<unknown>:", 10);
     }
     else
     {
-      ecma_ref_ecma_string (str_p);
-      str_p = ecma_append_magic_string_to_string (str_p, LIT_MAGIC_STRING_COLON_CHAR);
+      ecma_stringbuilder_append (&builder, str_p);
+      ecma_stringbuilder_append_byte (&builder, LIT_CHAR_COLON);
     }
 
     ecma_string_t *line_str_p = ecma_new_ecma_string_from_uint32 (context_p->current_line);
-    str_p = ecma_concat_ecma_strings (str_p, line_str_p);
+    ecma_stringbuilder_append (&builder, line_str_p);
     ecma_deref_ecma_string (line_str_p);
 
-    ecma_string_t *index_str_p = ecma_new_ecma_string_from_uint32 (index);
-    ecma_property_value_t *prop_value_p;
-    prop_value_p = ecma_create_named_data_property (array_p,
-                                                    index_str_p,
-                                                    ECMA_PROPERTY_CONFIGURABLE_ENUMERABLE_WRITABLE,
-                                                    NULL);
-    ecma_deref_ecma_string (index_str_p);
-
-    prop_value_p->value = ecma_make_string_value (str_p);
+    ecma_string_t *builder_str_p = ecma_stringbuilder_finalize (&builder);
+    ecma_fast_array_set_property (array_p, index, ecma_make_string_value (builder_str_p));
+    ecma_deref_ecma_string (builder_str_p);
 
     context_p = context_p->prev_context_p;
     index++;
@@ -116,17 +112,10 @@ vm_get_backtrace (uint32_t max_depth) /**< maximum backtrace depth, 0 = unlimite
     }
   }
 
-  if (index > 0)
-  {
-    JERRY_ASSERT (ecma_get_object_type (array_p) == ECMA_OBJECT_TYPE_ARRAY);
-
-    ((ecma_extended_object_t *) array_p)->u.array.length = index;
-  }
-
   return result_array;
-#else /* !JERRY_ENABLE_LINE_INFO */
+#else /* !ENABLED (JERRY_LINE_INFO) */
   JERRY_UNUSED (max_depth);
 
   return ecma_op_create_array_object (NULL, 0, false);
-#endif /* JERRY_ENABLE_LINE_INFO */
+#endif /* ENABLED (JERRY_LINE_INFO) */
 } /* vm_get_backtrace */

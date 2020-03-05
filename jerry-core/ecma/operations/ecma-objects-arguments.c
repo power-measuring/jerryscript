@@ -68,7 +68,9 @@ ecma_op_create_arguments_object (ecma_object_t *func_obj_p, /**< callee function
 
   ecma_object_t *obj_p;
 
-  if (!is_strict && arguments_number > 0 && formal_params_number > 0)
+  if ((bytecode_data_p->status_flags & CBC_CODE_FLAGS_MAPPED_ARGUMENTS_NEEDED)
+      && arguments_number > 0
+      && formal_params_number > 0)
   {
     size_t formal_params_size = formal_params_number * sizeof (ecma_value_t);
 
@@ -138,6 +140,22 @@ ecma_op_create_arguments_object (ecma_object_t *func_obj_p, /**< callee function
 
   ecma_property_descriptor_t prop_desc = ecma_make_empty_property_descriptor ();
 
+#if ENABLED (JERRY_ES2015)
+  /* ECMAScript v6, 9.4.4.6.7, 9.4.4.7.22 */
+  ecma_string_t *symbol_p = ecma_op_get_global_symbol (LIT_GLOBAL_SYMBOL_ITERATOR);
+
+  prop_value_p = ecma_create_named_data_property (obj_p,
+                                                  symbol_p,
+                                                  ECMA_PROPERTY_CONFIGURABLE_WRITABLE,
+                                                  NULL);
+  ecma_deref_ecma_string (symbol_p);
+  prop_value_p->value = ecma_op_object_get_by_magic_id (ecma_builtin_get (ECMA_BUILTIN_ID_INTRINSIC_OBJECT),
+                                                        LIT_INTERNAL_MAGIC_STRING_ARRAY_PROTOTYPE_VALUES);
+
+  JERRY_ASSERT (ecma_is_value_object (prop_value_p->value));
+  ecma_deref_object (ecma_get_object_from_value (prop_value_p->value));
+#endif /* ENABLED (JERRY_ES2015) */
+
   /* 13. */
   if (!is_strict)
   {
@@ -155,30 +173,23 @@ ecma_op_create_arguments_object (ecma_object_t *func_obj_p, /**< callee function
     /* 14. */
     prop_desc = ecma_make_empty_property_descriptor ();
     {
-      prop_desc.is_get_defined = true;
-      prop_desc.get_p = thrower_p;
-
-      prop_desc.is_set_defined = true;
-      prop_desc.set_p = thrower_p;
-
-      prop_desc.is_enumerable_defined = true;
-      prop_desc.is_enumerable = false;
-
-      prop_desc.is_configurable_defined = true;
-      prop_desc.is_configurable = false;
+      prop_desc.flags = (ECMA_PROP_IS_GET_DEFINED
+                         | ECMA_PROP_IS_SET_DEFINED
+                         | ECMA_PROP_IS_ENUMERABLE_DEFINED
+                         | ECMA_PROP_IS_CONFIGURABLE_DEFINED);
     }
+    prop_desc.set_p = thrower_p;
+    prop_desc.get_p = thrower_p;
 
     ecma_value_t completion = ecma_op_object_define_own_property (obj_p,
                                                                   ecma_get_magic_string (LIT_MAGIC_STRING_CALLEE),
-                                                                  &prop_desc,
-                                                                  false);
+                                                                  &prop_desc);
 
     JERRY_ASSERT (ecma_is_value_true (completion));
 
     completion = ecma_op_object_define_own_property (obj_p,
                                                      ecma_get_magic_string (LIT_MAGIC_STRING_CALLER),
-                                                     &prop_desc,
-                                                     false);
+                                                     &prop_desc);
     JERRY_ASSERT (ecma_is_value_true (completion));
   }
 
@@ -221,15 +232,13 @@ ecma_op_create_arguments_object (ecma_object_t *func_obj_p, /**< callee function
 ecma_value_t
 ecma_op_arguments_object_define_own_property (ecma_object_t *object_p, /**< the object */
                                               ecma_string_t *property_name_p, /**< property name */
-                                              const ecma_property_descriptor_t *property_desc_p, /**< property
+                                              const ecma_property_descriptor_t *property_desc_p) /**< property
                                                                                                   *   descriptor */
-                                              bool is_throw) /**< flag that controls failure handling */
 {
   /* 3. */
   ecma_value_t ret_value = ecma_op_general_object_define_own_property (object_p,
                                                                        property_name_p,
-                                                                       property_desc_p,
-                                                                       is_throw);
+                                                                       property_desc_p);
 
   if (ECMA_IS_VALUE_ERROR (ret_value))
   {
@@ -259,15 +268,14 @@ ecma_op_arguments_object_define_own_property (ecma_object_t *object_p, /**< the 
 
   ecma_string_t *name_p = ecma_get_string_from_value (arg_Literal_p[index]);
 
-  if (property_desc_p->is_get_defined
-      || property_desc_p->is_set_defined)
+  if (property_desc_p->flags & (ECMA_PROP_IS_GET_DEFINED | ECMA_PROP_IS_SET_DEFINED))
   {
     ecma_deref_ecma_string (name_p);
     arg_Literal_p[index] = ECMA_VALUE_EMPTY;
   }
   else
   {
-    if (property_desc_p->is_value_defined)
+    if (property_desc_p->flags & ECMA_PROP_IS_VALUE_DEFINED)
     {
       /* emulating execution of function described by MakeArgSetter */
       ecma_object_t *lex_env_p = ECMA_GET_INTERNAL_VALUE_POINTER (ecma_object_t,
@@ -281,8 +289,8 @@ ecma_op_arguments_object_define_own_property (ecma_object_t *object_p, /**< the 
       JERRY_ASSERT (ecma_is_value_empty (completion));
     }
 
-    if (property_desc_p->is_writable_defined
-        && !property_desc_p->is_writable)
+    if ((property_desc_p->flags & ECMA_PROP_IS_WRITABLE_DEFINED)
+        && !(property_desc_p->flags & ECMA_PROP_IS_WRITABLE))
     {
       ecma_deref_ecma_string (name_p);
       arg_Literal_p[index] = ECMA_VALUE_EMPTY;

@@ -30,7 +30,6 @@
 /* Sometimes it's necessary to define __LITTLE_ENDIAN explicitly
    but these catch some common cases. */
 
-
 #ifndef __LITTLE_ENDIAN
 /* Check if compiler has byte order macro. Some older versions do not.
  * If byte order is supported and set to little or target is among common
@@ -48,12 +47,35 @@
 #endif /* !__LITTLE_ENDIAN */
 
 #ifdef __LITTLE_ENDIAN
-#define __HI(x) *(1 + (int *) &x)
-#define __LO(x) *(int *) &x
+#define __HI(x) *(1 + (const int *) &x)
+#define __LO(x) *(const int *) &x
+typedef union
+{
+  double dbl;
+  struct
+  {
+    int lo;
+    int hi;
+  } as_int;
+} double_accessor;
 #else /* !__LITTLE_ENDIAN */
-#define __HI(x) *(int *) &x
-#define __LO(x) *(1 + (int *) &x)
+#define __HI(x) *(const int *) &x
+#define __LO(x) *(1 + (const int *) &x)
+
+typedef union
+{
+  double dbl;
+  struct
+  {
+    int hi;
+    int lo;
+  } as_int;
+} double_accessor;
 #endif /* __LITTLE_ENDIAN */
+
+#ifndef NAN
+#define NAN (0.0/0.0)
+#endif
 
 /*
  * ANSI/POSIX

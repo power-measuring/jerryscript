@@ -91,9 +91,9 @@ ecma_property_t *
 ecma_builtin_try_to_instantiate_property (ecma_object_t *object_p, ecma_string_t *string_p);
 void
 ecma_builtin_list_lazy_property_names (ecma_object_t *object_p,
-                                       bool separate_enumerable,
-                                       ecma_collection_header_t *main_collection_p,
-                                       ecma_collection_header_t *non_enum_collection_p);
+                                       uint32_t opts,
+                                       ecma_collection_t *main_collection_p,
+                                       ecma_collection_t *non_enum_collection_p);
 bool
 ecma_builtin_is (ecma_object_t *obj_p, ecma_builtin_id_t builtin_id);
 ecma_object_t *

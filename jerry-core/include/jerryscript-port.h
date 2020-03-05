@@ -21,6 +21,7 @@
 #include <stdio.h>
 
 #include "jerryscript-compiler.h"
+#include "jerryscript-core.h"
 
 #ifdef __cplusplus
 extern "C"
@@ -50,6 +51,7 @@ typedef enum
   ERR_OUT_OF_MEMORY = 10,
   ERR_REF_COUNT_LIMIT = 12,
   ERR_DISABLED_BYTE_CODE = 13,
+  ERR_UNTERMINATED_GC_LOOPS = 14,
   ERR_FAILED_INTERNAL_ASSERTION = 120
 } jerry_fatal_code_t;
 
@@ -99,8 +101,8 @@ typedef enum
  * vfprintf(logfile), or both, depending on log level.
  *
  * Note:
- *      This port function is called by jerry-core when JERRY_ENABLE_LOGGING is
- *      defined. It is also common practice though to use this function in
+ *      This port function is called by jerry-core when JERRY_LOGGING is
+ *      enabled. It is also common practice though to use this function in
  *      application code.
  */
 void JERRY_ATTR_FORMAT (printf, 2, 3) jerry_port_log (jerry_log_level_t level, const char *format, ...);
@@ -161,7 +163,7 @@ double jerry_port_get_current_time (void);
  *
  * Note:
  *      This port function is called by jerry-core when
- *      JERRY_ENABLE_EXTERNAL_CONTEXT is defined. Otherwise this function is not
+ *      JERRY_EXTERNAL_CONTEXT is enabled. Otherwise this function is not
  *      used.
  *
  * @return the pointer to the engine context.
@@ -173,7 +175,7 @@ struct jerry_context_t *jerry_port_get_current_context (void);
  *
  * Note:
  *      This port function is called by jerry-core when JERRY_DEBUGGER is
- *      defined. Otherwise this function is not used.
+ *      enabled (set to 1). Otherwise this function is not used.
  *
  * @param sleep_time milliseconds to sleep.
  */
@@ -225,11 +227,30 @@ void jerry_port_release_source (uint8_t *buffer_p);
  * @param in_path_p Input path as a zero terminated string.
  * @param out_buf_p Pointer to the output buffer where the normalized path should be written.
  * @param out_buf_size Size of the output buffer.
+ * @param base_file_p A file path that 'in_path_p' is relative to, usually the current module file.
+ *                    A NULL value represents that 'in_path_p' is relative to the current working directory.
  *
  * @return length of the string written to the output buffer
  *         zero, if the buffer was not sufficient or an error occured
  */
-size_t jerry_port_normalize_path (const char *in_path_p, char *out_buf_p, size_t out_buf_size);
+size_t jerry_port_normalize_path (const char *in_path_p,
+                                  char *out_buf_p,
+                                  size_t out_buf_size,
+                                  char *base_file_p);
+
+/**
+ * Get the module object of a native module.
+ *
+ * Note:
+ *      This port function is called by jerry-core when ES2015_MODULE_SYSTEM
+ *      is enabled.
+ *
+ * @param name String value of the module specifier.
+ *
+ * @return Undefined, if 'name' is not a native module
+ *         jerry_value_t containing the module object, otherwise
+ */
+jerry_value_t jerry_port_get_native_module (jerry_value_t name);
 
 /**
  * @}

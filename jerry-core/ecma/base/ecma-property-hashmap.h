@@ -53,6 +53,8 @@ typedef struct
    */
 } ecma_property_hashmap_t;
 
+#if ENABLED (JERRY_PROPRETY_HASHMAP)
+
 /**
  * Simple ecma values
  */
@@ -70,10 +72,9 @@ void ecma_property_hashmap_insert (ecma_object_t *object_p, ecma_string_t *name_
 ecma_property_hashmap_delete_status ecma_property_hashmap_delete (ecma_object_t *object_p, jmem_cpointer_t name_cp,
                                                                   ecma_property_t *property_p);
 
-#ifndef CONFIG_ECMA_PROPERTY_HASHMAP_DISABLE
 ecma_property_t *ecma_property_hashmap_find (ecma_property_hashmap_t *hashmap_p, ecma_string_t *name_p,
                                              jmem_cpointer_t *property_real_name_cp);
-#endif /* !CONFIG_ECMA_PROPERTY_HASHMAP_DISABLE */
+#endif /* ENABLED (JERRY_PROPRETY_HASHMAP) */
 
 /**
  * @}

@@ -47,6 +47,31 @@ static const char *output_file_name_p = "js.snapshot";
 static jerry_length_t magic_string_lengths[JERRY_LITERAL_LENGTH];
 static const jerry_char_t *magic_string_items[JERRY_LITERAL_LENGTH];
 static void sighandler (int signo, siginfo_t *si, void *data);
+
+#if defined (JERRY_EXTERNAL_CONTEXT) && (JERRY_EXTERNAL_CONTEXT == 1)
+/**
+ * The alloc function passed to jerry_create_context
+ */
+static void *
+context_alloc (size_t size,
+               void *cb_data_p)
+{
+  (void) cb_data_p; /* unused */
+  return malloc (size);
+} /* context_alloc */
+
+/**
+ * Create and set the default external context.
+ */
+static void
+context_init (void)
+{
+  jerry_context_t *context_p = jerry_create_context (JERRY_GLOBAL_HEAP_SIZE * 1024, context_alloc, NULL);
+  jerry_port_default_set_current_context (context_p);
+} /* context_init */
+
+#endif /* defined (JERRY_EXTERNAL_CONTEXT) && (JERRY_EXTERNAL_CONTEXT == 1) */
+
 /**
  * Check whether JerryScript has a requested feature enabled or not. If not,
  * print a warning message.
@@ -149,7 +174,7 @@ print_unhandled_exception (jerry_value_t error_value) /**< error value */
     return;
   }
 
-  jerry_size_t err_str_size = jerry_get_string_size (err_str_val);
+  jerry_size_t err_str_size = jerry_get_utf8_string_size (err_str_val);
 
   if (err_str_size >= 256)
   {
@@ -159,7 +184,7 @@ print_unhandled_exception (jerry_value_t error_value) /**< error value */
   }
 
   jerry_char_t err_str_buf[256];
-  jerry_size_t string_end = jerry_string_to_char_buffer (err_str_val, err_str_buf, err_str_size);
+  jerry_size_t string_end = jerry_string_to_utf8_char_buffer (err_str_val, err_str_buf, err_str_size);
   assert (string_end == err_str_size);
   err_str_buf[string_end] = 0;
 
@@ -175,6 +200,7 @@ typedef enum
   OPT_GENERATE_HELP,
   OPT_GENERATE_STATIC,
   OPT_GENERATE_SHOW_OP,
+  OPT_GENERATE_FUNCTION,
   OPT_GENERATE_OUT,
   OPT_IMPORT_LITERAL_LIST
 } generate_opt_id_t;
@@ -188,6 +214,9 @@ static const cli_opt_t generate_opts[] =
                .help = "print this help and exit"),
   CLI_OPT_DEF (.id = OPT_GENERATE_STATIC, .opt = "s", .longopt = "static",
                .help = "generate static snapshot"),
+  CLI_OPT_DEF (.id = OPT_GENERATE_FUNCTION, .opt = "f", .longopt = "generate-function-snapshot",
+               .meta = "ARGUMENTS",
+               .help = "generate function snapshot with given arguments"),
   CLI_OPT_DEF (.id = OPT_IMPORT_LITERAL_LIST, .longopt = "load-literals-list-format",
                .meta = "FILE",
                .help = "import literals from list format (for static snapshots)"),
@@ -218,6 +247,7 @@ process_generate (cli_state_t *cli_state_p, /**< cli state */
   uint8_t *source_p = input_buffer;
   size_t source_length = 0;
   const char *literals_file_name_p = NULL;
+  const char *function_args_p = NULL;
 
   cli_change_opts (cli_state_p, generate_opts);
 
@@ -233,6 +263,11 @@ process_generate (cli_state_t *cli_state_p, /**< cli state */
       case OPT_GENERATE_STATIC:
       {
         snapshot_flags |= JERRY_SNAPSHOT_SAVE_STATIC;
+        break;
+      }
+      case OPT_GENERATE_FUNCTION:
+      {
+        function_args_p = cli_consume_string (cli_state_p);
         break;
       }
       case OPT_IMPORT_LITERAL_LIST:
@@ -295,6 +330,10 @@ process_generate (cli_state_t *cli_state_p, /**< cli state */
     return JERRY_STANDALONE_EXIT_CODE_FAIL;
   }
 
+#if defined (JERRY_EXTERNAL_CONTEXT) && (JERRY_EXTERNAL_CONTEXT == 1)
+  context_init ();
+#endif /* defined (JERRY_EXTERNAL_CONTEXT) && (JERRY_EXTERNAL_CONTEXT == 1) */
+
   jerry_init (flags);
 
   if (!jerry_is_valid_utf8_string (source_p, (jerry_size_t) source_length))
@@ -338,13 +377,29 @@ process_generate (cli_state_t *cli_state_p, /**< cli state */
   }
 
   jerry_value_t snapshot_result;
-  snapshot_result = jerry_generate_snapshot ((jerry_char_t *) file_name_p,
-                                             (size_t) strlen (file_name_p),
-                                             (jerry_char_t *) source_p,
-                                             source_length,
-                                             snapshot_flags,
-                                             output_buffer,
-                                             sizeof (output_buffer) / sizeof (uint32_t));
+
+  if (function_args_p != NULL)
+  {
+    snapshot_result = jerry_generate_function_snapshot ((jerry_char_t *) file_name_p,
+                                                        (size_t) strlen (file_name_p),
+                                                        (jerry_char_t *) source_p,
+                                                        source_length,
+                                                        (const jerry_char_t *) function_args_p,
+                                                        strlen (function_args_p),
+                                                        snapshot_flags,
+                                                        output_buffer,
+                                                        sizeof (output_buffer) / sizeof (uint32_t));
+  }
+  else
+  {
+    snapshot_result = jerry_generate_snapshot ((jerry_char_t *) file_name_p,
+                                               (size_t) strlen (file_name_p),
+                                               (jerry_char_t *) source_p,
+                                               source_length,
+                                               snapshot_flags,
+                                               output_buffer,
+                                               sizeof (output_buffer) / sizeof (uint32_t));
+  }
 
   if (jerry_value_is_error (snapshot_result))
   {
@@ -497,6 +552,10 @@ process_literal_dump (cli_state_t *cli_state_p, /**< cli state */
     jerry_port_log (JERRY_LOG_LEVEL_ERROR, "Error: at least one input file must be specified.\n");
     return JERRY_STANDALONE_EXIT_CODE_FAIL;
   }
+
+#if defined (JERRY_EXTERNAL_CONTEXT) && (JERRY_EXTERNAL_CONTEXT == 1)
+  context_init ();
+#endif /* defined (JERRY_EXTERNAL_CONTEXT) && (JERRY_EXTERNAL_CONTEXT == 1) */
 
   jerry_init (JERRY_INIT_EMPTY);
 
@@ -661,6 +720,10 @@ process_merge (cli_state_t *cli_state_p, /**< cli state */
     jerry_port_log (JERRY_LOG_LEVEL_ERROR, "Error: at least two input files must be passed.\n");
     return JERRY_STANDALONE_EXIT_CODE_FAIL;
   }
+
+#if defined (JERRY_EXTERNAL_CONTEXT) && (JERRY_EXTERNAL_CONTEXT == 1)
+  context_init ();
+#endif /* defined (JERRY_EXTERNAL_CONTEXT) && (JERRY_EXTERNAL_CONTEXT == 1) */
 
   jerry_init (JERRY_INIT_EMPTY);
 

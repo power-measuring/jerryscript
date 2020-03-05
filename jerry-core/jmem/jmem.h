@@ -41,6 +41,37 @@
 #define JMEM_ALIGNMENT (1u << JMEM_ALIGNMENT_LOG)
 
 /**
+ * Pointer value can be directly stored without compression
+ */
+#if UINTPTR_MAX <= UINT32_MAX
+#define JMEM_CAN_STORE_POINTER_VALUE_DIRECTLY
+#endif /* UINTPTR_MAX <= UINT32_MAX */
+
+/**
+ * Mask for tag part in jmem_cpointer_tag_t
+ */
+#define JMEM_TAG_MASK 0x7u
+
+/**
+ * Shift for tag part in jmem_cpointer_tag_t
+ */
+#if defined (JMEM_CAN_STORE_POINTER_VALUE_DIRECTLY) && ENABLED (JERRY_CPOINTER_32_BIT)
+#define JMEM_TAG_SHIFT 0
+#else /* !JMEM_CAN_STORE_POINTER_VALUE_DIRECTLY || !ENABLED (JERRY_CPOINTER_32_BIT) */
+#define JMEM_TAG_SHIFT 3
+#endif /* JMEM_CAN_STORE_POINTER_VALUE_DIRECTLY && ENABLED (JERRY_CPOINTER_32_BIT) */
+
+/**
+ * Bit mask for tag part in jmem_cpointer_tag_t
+ */
+enum
+{
+  JMEM_FIRST_TAG_BIT_MASK   = (1u << 0), /**< first tag bit mask **/
+  JMEM_SECOND_TAG_BIT_MASK  = (1u << 1), /**< second tag bit mask **/
+  JMEM_THIRD_TAG_BIT_MASK   = (1u << 2), /**< third tag bit mask **/
+};
+
+/**
  * Compressed pointer representations
  *
  * 16 bit representation:
@@ -63,26 +94,33 @@
 /**
  * Compressed pointer
  */
-#ifdef JERRY_CPOINTER_32_BIT
+#if ENABLED (JERRY_CPOINTER_32_BIT)
 typedef uint32_t jmem_cpointer_t;
-#else /* !JERRY_CPOINTER_32_BIT */
+#else /* !ENABLED (JERRY_CPOINTER_32_BIT) */
 typedef uint16_t jmem_cpointer_t;
-#endif /* JERRY_CPOINTER_32_BIT */
+#endif /* ENABLED (JERRY_CPOINTER_32_BIT) */
 
 /**
- * Severity of a 'try give memory back' request
+ * Compressed pointer with tag value
+ */
+typedef uint32_t jmem_cpointer_tag_t;
+
+/**
+ * Memory usage pressure for reclaiming unused memory.
  *
- * The request are posted sequentially beginning from
- * low to high until enough memory is freed.
+ * Each failed allocation will try to reclaim memory with increasing pressure,
+ * until enough memory is freed to fulfill the allocation request.
  *
- * If not enough memory is freed upon a high request
+ * If not enough memory is freed and JMEM_PRESSURE_FULL is reached,
  * then the engine is shut down with ERR_OUT_OF_MEMORY.
  */
 typedef enum
 {
-  JMEM_FREE_UNUSED_MEMORY_SEVERITY_LOW,  /**< 'low' severity */
-  JMEM_FREE_UNUSED_MEMORY_SEVERITY_HIGH, /**< 'high' severity */
-} jmem_free_unused_memory_severity_t;
+  JMEM_PRESSURE_NONE, /**< no memory pressure */
+  JMEM_PRESSURE_LOW,  /**< low memory pressure */
+  JMEM_PRESSURE_HIGH, /**< high memory pressure */
+  JMEM_PRESSURE_FULL, /**< memory full */
+} jmem_pressure_t;
 
 /**
  * Node for free chunk list
@@ -106,9 +144,10 @@ void jmem_finalize (void);
 
 void *jmem_heap_alloc_block (const size_t size);
 void *jmem_heap_alloc_block_null_on_error (const size_t size);
+void *jmem_heap_realloc_block (void *ptr, const size_t old_size, const size_t new_size);
 void jmem_heap_free_block (void *ptr, const size_t size);
 
-#ifdef JMEM_STATS
+#if ENABLED (JERRY_MEM_STATS)
 /**
  * Heap memory usage statistics
  */
@@ -133,15 +172,6 @@ typedef struct
 
   size_t property_bytes; /**< allocated memory for properties */
   size_t peak_property_bytes; /**< peak allocated memory for properties */
-
-  size_t skip_count; /**< Number of skip-aheads during insertion of free block */
-  size_t nonskip_count; /**< Number of times we could not skip ahead during
-                         *   free block insertion */
-
-  size_t alloc_count; /**< number of memory allocations */
-  size_t free_count; /**< number of memory frees */
-  size_t alloc_iter_count; /**< Number of iterations required for allocations */
-  size_t free_iter_count; /**< Number of iterations required for inserting free blocks */
 } jmem_heap_stats_t;
 
 void jmem_stats_allocate_byte_code_bytes (size_t property_size);
@@ -154,20 +184,12 @@ void jmem_stats_allocate_property_bytes (size_t property_size);
 void jmem_stats_free_property_bytes (size_t property_size);
 
 void jmem_heap_get_stats (jmem_heap_stats_t *);
-#endif /* JMEM_STATS */
+void jmem_heap_stats_reset_peak (void);
+void jmem_heap_stats_print (void);
+#endif /* ENABLED (JERRY_MEM_STATS) */
 
 jmem_cpointer_t JERRY_ATTR_PURE jmem_compress_pointer (const void *pointer_p);
 void * JERRY_ATTR_PURE jmem_decompress_pointer (uintptr_t compressed_pointer);
-
-/**
- * A free memory callback routine type.
- */
-typedef void (*jmem_free_unused_memory_callback_t) (jmem_free_unused_memory_severity_t);
-
-void jmem_register_free_unused_memory_callback (jmem_free_unused_memory_callback_t callback);
-void jmem_unregister_free_unused_memory_callback (jmem_free_unused_memory_callback_t callback);
-
-void jmem_run_free_unused_memory_callbacks (jmem_free_unused_memory_severity_t severity);
 
 /**
  * Define a local array variable and allocate memory for the array on the heap.
@@ -238,6 +260,44 @@ void jmem_run_free_unused_memory_callbacks (jmem_free_unused_memory_severity_t s
   } while (false);
 
 /**
+ * Set value of pointer-tag value so that it will correspond
+ * to specified non_compressed_pointer along with tag
+ */
+#define JMEM_CP_SET_NON_NULL_POINTER_TAG(cp_value, pointer, tag) \
+  do \
+  { \
+    JERRY_ASSERT ((uintptr_t) tag < (uintptr_t) (JMEM_ALIGNMENT)); \
+    jmem_cpointer_tag_t compressed_ptr = jmem_compress_pointer (pointer); \
+    (cp_value) = (jmem_cpointer_tag_t) ((compressed_ptr << JMEM_TAG_SHIFT) | tag); \
+  } while (false);
+
+/**
+ * Extract value of pointer from specified pointer-tag value
+ */
+#define JMEM_CP_GET_NON_NULL_POINTER_FROM_POINTER_TAG(type, cp_value) \
+  ((type *) (jmem_decompress_pointer ((cp_value & ~JMEM_TAG_MASK) >> JMEM_TAG_SHIFT)))
+
+/**
+ * Get value of each tag from specified pointer-tag value
+ */
+#define JMEM_CP_GET_FIRST_BIT_FROM_POINTER_TAG(cp_value) \
+  (cp_value & JMEM_FIRST_TAG_BIT_MASK) /**< get first tag bit **/
+#define JMEM_CP_GET_SECOND_BIT_FROM_POINTER_TAG(cp_value) \
+  (cp_value & JMEM_SECOND_TAG_BIT_MASK) /**< get second tag bit **/
+#define JMEM_CP_GET_THIRD_BIT_FROM_POINTER_TAG(cp_value) \
+  (cp_value & JMEM_THIRD_TAG_BIT_MASK) /**< get third tag bit **/
+
+/**
+ * Set value of each tag to specified pointer-tag value
+ */
+#define JMEM_CP_SET_FIRST_BIT_TO_POINTER_TAG(cp_value) \
+  (cp_value) = (cp_value | JMEM_FIRST_TAG_BIT_MASK) /**< set first tag bit **/
+#define JMEM_CP_SET_SECOND_BIT_TO_POINTER_TAG(cp_value) \
+  (cp_value) = (cp_value | JMEM_SECOND_TAG_BIT_MASK) /**< set second tag bit **/
+#define JMEM_CP_SET_THIRD_BIT_TO_POINTER_TAG(cp_value) \
+  (cp_value) = (cp_value | JMEM_THIRD_TAG_BIT_MASK) /**< set third tag bit **/
+
+/**
  * @}
  * \addtogroup poolman Memory pool manager
  * @{
@@ -245,6 +305,7 @@ void jmem_run_free_unused_memory_callbacks (jmem_free_unused_memory_severity_t s
 
 void *jmem_pools_alloc (size_t size);
 void jmem_pools_free (void *chunk_p, size_t size);
+void jmem_pools_collect_empty (void);
 
 /**
  * @}

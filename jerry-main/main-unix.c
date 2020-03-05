@@ -118,7 +118,7 @@ print_unhandled_exception (jerry_value_t error_value) /**< error value */
         if (!jerry_value_is_error (item_val)
             && jerry_value_is_string (item_val))
         {
-          jerry_size_t str_size = jerry_get_string_size (item_val);
+          jerry_size_t str_size = jerry_get_utf8_string_size (item_val);
 
           if (str_size >= 256)
           {
@@ -126,7 +126,7 @@ print_unhandled_exception (jerry_value_t error_value) /**< error value */
           }
           else
           {
-            jerry_size_t string_end = jerry_string_to_char_buffer (item_val, err_str_buf, str_size);
+            jerry_size_t string_end = jerry_string_to_utf8_char_buffer (item_val, err_str_buf, str_size);
             assert (string_end == str_size);
             err_str_buf[string_end] = 0;
 
@@ -141,7 +141,7 @@ print_unhandled_exception (jerry_value_t error_value) /**< error value */
   }
 
   jerry_value_t err_str_val = jerry_value_to_string (error_value);
-  jerry_size_t err_str_size = jerry_get_string_size (err_str_val);
+  jerry_size_t err_str_size = jerry_get_utf8_string_size (err_str_val);
 
   if (err_str_size >= 256)
   {
@@ -151,53 +151,44 @@ print_unhandled_exception (jerry_value_t error_value) /**< error value */
   }
   else
   {
-    jerry_size_t string_end = jerry_string_to_char_buffer (err_str_val, err_str_buf, err_str_size);
+    jerry_size_t string_end = jerry_string_to_utf8_char_buffer (err_str_val, err_str_buf, err_str_size);
     assert (string_end == err_str_size);
     err_str_buf[string_end] = 0;
 
     if (jerry_is_feature_enabled (JERRY_FEATURE_ERROR_MESSAGES)
         && jerry_get_error_type (error_value) == JERRY_ERROR_SYNTAX)
     {
+      jerry_char_t *string_end_p = err_str_buf + string_end;
       unsigned int err_line = 0;
       unsigned int err_col = 0;
+      char *path_str_p = NULL;
+      char *path_str_end_p = NULL;
 
       /* 1. parse column and line information */
-      for (jerry_size_t i = 0; i < string_end; i++)
+      for (jerry_char_t *current_p = err_str_buf; current_p < string_end_p; current_p++)
       {
-        if (!strncmp ((char *) (err_str_buf + i), "[line: ", 7))
+        if (*current_p == '[')
         {
-          i += 7;
+          current_p++;
 
-          char num_str[8];
-          unsigned int j = 0;
-
-          while (i < string_end && err_str_buf[i] != ',')
+          if (*current_p == '<')
           {
-            num_str[j] = (char) err_str_buf[i];
-            j++;
-            i++;
-          }
-          num_str[j] = '\0';
-
-          err_line = (unsigned int) strtol (num_str, NULL, 10);
-
-          if (strncmp ((char *) (err_str_buf + i), ", column: ", 10))
-          {
-            break; /* wrong position info format */
+            break;
           }
 
-          i += 10;
-          j = 0;
-
-          while (i < string_end && err_str_buf[i] != ']')
+          path_str_p = (char *) current_p;
+          while (current_p < string_end_p && *current_p != ':')
           {
-            num_str[j] = (char) err_str_buf[i];
-            j++;
-            i++;
+            current_p++;
           }
-          num_str[j] = '\0';
 
-          err_col = (unsigned int) strtol (num_str, NULL, 10);
+          path_str_end_p = (char *) current_p++;
+
+          err_line = (unsigned int) strtol ((char *) current_p, (char **) &current_p, 10);
+
+          current_p++;
+
+          err_col = (unsigned int) strtol ((char *) current_p, NULL, 10);
           break;
         }
       } /* for */
@@ -209,8 +200,18 @@ print_unhandled_exception (jerry_value_t error_value) /**< error value */
         bool is_printing_context = false;
         unsigned int pos = 0;
 
+        size_t source_size;
+
+        /* Temporarily modify the error message, so we can use the path. */
+        *path_str_end_p = '\0';
+
+        read_file (path_str_p, &source_size);
+
+        /* Revert the error message. */
+        *path_str_end_p = ':';
+
         /* 2. seek and print */
-        while ((pos < JERRY_BUFFER_SIZE) && (buffer[pos] != '\0'))
+        while ((pos < source_size) && (buffer[pos] != '\0'))
         {
           if (buffer[pos] == '\n')
           {
@@ -273,7 +274,6 @@ register_js_function (const char *name_p, /**< name of the function */
   jerry_release_value (result_val);
 } /* register_js_function */
 
-
 /**
  * Runs the source code received by jerry_debugger_wait_for_client_source.
  *
@@ -303,7 +303,6 @@ wait_for_source_callback (const jerry_char_t *resource_name_p, /**< resource nam
   return ret_val;
 } /* wait_for_source_callback */
 
-
 /**
  * Command line option IDs
  */
@@ -324,8 +323,8 @@ typedef enum
   OPT_EXEC_SNAP,
   OPT_EXEC_SNAP_FUNC,
   OPT_LOG_LEVEL,
-  OPT_ABORT_ON_FAIL,
-  OPT_NO_PROMPT
+  OPT_NO_PROMPT,
+  OPT_CALL_ON_EXIT
 } main_opt_id_t;
 
 /**
@@ -363,12 +362,12 @@ static const cli_opt_t main_opts[] =
                .help = "execute specific function from input snapshot file(s)"),
   CLI_OPT_DEF (.id = OPT_LOG_LEVEL, .longopt = "log-level", .meta = "NUM",
                .help = "set log level (0-3)"),
-  CLI_OPT_DEF (.id = OPT_ABORT_ON_FAIL, .longopt = "abort-on-fail",
-               .help = "segfault on internal failure (instead of non-zero exit code)"),
   CLI_OPT_DEF (.id = OPT_NO_PROMPT, .longopt = "no-prompt",
                .help = "don't print prompt in REPL mode"),
+  CLI_OPT_DEF (.id = OPT_CALL_ON_EXIT, .longopt = "call-on-exit", .meta = "STRING",
+               .help = "invoke the specified function when the process is just about to exit"),
   CLI_OPT_DEF (.id = CLI_OPT_DEFAULT, .meta = "FILE",
-               .help = "input JS file(s)")
+               .help = "input JS file(s) (If file is -, read standard input.)")
 };
 
 /**
@@ -407,7 +406,7 @@ check_usage (bool condition, /**< the condition that must hold */
   }
 } /* check_usage */
 
-#ifdef JERRY_ENABLE_EXTERNAL_CONTEXT
+#if defined (JERRY_EXTERNAL_CONTEXT) && (JERRY_EXTERNAL_CONTEXT == 1)
 
 /**
  * The alloc function passed to jerry_create_context
@@ -420,7 +419,7 @@ context_alloc (size_t size,
   return malloc (size);
 } /* context_alloc */
 
-#endif /* JERRY_ENABLE_EXTERNAL_CONTEXT */
+#endif /* defined (JERRY_EXTERNAL_CONTEXT) && (JERRY_EXTERNAL_CONTEXT == 1) */
 
 /**
  * Inits the engine and the debugger
@@ -461,6 +460,7 @@ init_engine (jerry_init_flag_t flags, /**< initialized flags for the engine */
   register_js_function ("assert", jerryx_handler_assert);
   register_js_function ("gc", jerryx_handler_gc);
   register_js_function ("print", jerryx_handler_print);
+  register_js_function ("resourceName", jerryx_handler_resource_name);
 } /* init_engine */
 
 int
@@ -489,6 +489,8 @@ main (int argc,
   bool is_wait_mode = false;
   bool no_prompt = false;
 
+  const char *exit_cb = NULL;
+
   cli_state_t cli_state = cli_init (main_opts, argc - 1, argv + 1);
   for (int id = cli_consume_option (&cli_state); id != CLI_OPT_END; id = cli_consume_option (&cli_state))
   {
@@ -501,7 +503,11 @@ main (int argc,
       }
       case OPT_VERSION:
       {
-        printf ("Version: %d.%d%s\n", JERRY_API_MAJOR_VERSION, JERRY_API_MINOR_VERSION, JERRY_COMMIT_HASH);
+        printf ("Version: %d.%d.%d%s\n",
+                JERRY_API_MAJOR_VERSION,
+                JERRY_API_MINOR_VERSION,
+                JERRY_API_PATCH_VERSION,
+                JERRY_COMMIT_HASH);
         return JERRY_STANDALONE_EXIT_CODE_OK;
       }
       case OPT_MEM_STATS:
@@ -525,6 +531,11 @@ main (int argc,
           jerry_port_default_set_log_level (JERRY_LOG_LEVEL_DEBUG);
           flags |= JERRY_INIT_SHOW_OPCODES;
         }
+        break;
+      }
+      case OPT_CALL_ON_EXIT:
+      {
+        exit_cb = cli_consume_string (&cli_state);
         break;
       }
       case OPT_SHOW_RE_OP:
@@ -623,11 +634,6 @@ main (int argc,
         jerry_port_default_set_log_level ((jerry_log_level_t) log_level);
         break;
       }
-      case OPT_ABORT_ON_FAIL:
-      {
-        jerry_port_default_set_abort_on_fail (true);
-        break;
-      }
       case OPT_NO_PROMPT:
       {
         no_prompt = true;
@@ -666,12 +672,12 @@ main (int argc,
     is_repl_mode = true;
   }
 
-#ifdef JERRY_ENABLE_EXTERNAL_CONTEXT
+#if defined (JERRY_EXTERNAL_CONTEXT) && (JERRY_EXTERNAL_CONTEXT == 1)
 
-  jerry_context_t *context_p = jerry_create_context (512*1024, context_alloc, NULL);
+  jerry_context_t *context_p = jerry_create_context (JERRY_GLOBAL_HEAP_SIZE * 1024, context_alloc, NULL);
   jerry_port_default_set_current_context (context_p);
 
-#endif /* JERRY_ENABLE_EXTERNAL_CONTEXT */
+#endif /* defined (JERRY_EXTERNAL_CONTEXT) && (JERRY_EXTERNAL_CONTEXT == 1) */
 
   if (!start_debug_server)
   {
@@ -860,7 +866,7 @@ main (int argc,
       /* Read a line */
       while (true)
       {
-        if (fread (source_buffer_tail, 1, 1, stdin) != 1 && len == 0)
+        if (fread (source_buffer_tail, 1, 1, stdin) != 1)
         {
           is_done = true;
           break;
@@ -883,33 +889,44 @@ main (int argc,
         }
 
         /* Evaluate the line */
-        jerry_value_t ret_val_eval = jerry_eval (buffer, len, JERRY_PARSE_NO_OPTS);
+        jerry_value_t ret_val = jerry_parse (NULL,
+                                             0,
+                                             buffer,
+                                             len,
+                                             JERRY_PARSE_NO_OPTS);
 
-        if (!jerry_value_is_error (ret_val_eval))
+        if (!jerry_value_is_error (ret_val))
+        {
+          jerry_value_t func_val = ret_val;
+          ret_val = jerry_run (func_val);
+          jerry_release_value (func_val);
+        }
+
+        if (!jerry_value_is_error (ret_val))
         {
           /* Print return value */
-          const jerry_value_t args[] = { ret_val_eval };
+          const jerry_value_t args[] = { ret_val };
           jerry_value_t ret_val_print = jerryx_handler_print (jerry_create_undefined (),
                                                               jerry_create_undefined (),
                                                               args,
                                                               1);
           jerry_release_value (ret_val_print);
-          jerry_release_value (ret_val_eval);
-          ret_val_eval = jerry_run_all_enqueued_jobs ();
+          jerry_release_value (ret_val);
+          ret_val = jerry_run_all_enqueued_jobs ();
 
-          if (jerry_value_is_error (ret_val_eval))
+          if (jerry_value_is_error (ret_val))
           {
-            ret_val_eval = jerry_get_value_from_error (ret_val_eval, true);
-            print_unhandled_exception (ret_val_eval);
+            ret_val = jerry_get_value_from_error (ret_val, true);
+            print_unhandled_exception (ret_val);
           }
         }
         else
         {
-          ret_val_eval = jerry_get_value_from_error (ret_val_eval, true);
-          print_unhandled_exception (ret_val_eval);
+          ret_val = jerry_get_value_from_error (ret_val, true);
+          print_unhandled_exception (ret_val);
         }
 
-        jerry_release_value (ret_val_eval);
+        jerry_release_value (ret_val);
       }
     }
   }
@@ -937,9 +954,35 @@ main (int argc,
 
   jerry_release_value (ret_value);
 
+  if (exit_cb != NULL)
+  {
+    jerry_value_t global = jerry_get_global_object ();
+    jerry_value_t fn_str = jerry_create_string ((jerry_char_t *) exit_cb);
+    jerry_value_t callback_fn = jerry_get_property (global, fn_str);
+
+    jerry_release_value (global);
+    jerry_release_value (fn_str);
+
+    if (jerry_value_is_function (callback_fn))
+    {
+      jerry_value_t ret_val = jerry_call_function (callback_fn, jerry_create_undefined (), NULL, 0);
+
+      if (jerry_value_is_error (ret_val))
+      {
+        ret_val = jerry_get_value_from_error (ret_val, true);
+        print_unhandled_exception (ret_val);
+        ret_code = JERRY_STANDALONE_EXIT_CODE_FAIL;
+      }
+
+      jerry_release_value (ret_val);
+    }
+
+    jerry_release_value (callback_fn);
+  }
+
   jerry_cleanup ();
-#ifdef JERRY_ENABLE_EXTERNAL_CONTEXT
+#if defined (JERRY_EXTERNAL_CONTEXT) && (JERRY_EXTERNAL_CONTEXT == 1)
   free (context_p);
-#endif /* JERRY_ENABLE_EXTERNAL_CONTEXT */
+#endif /* defined (JERRY_EXTERNAL_CONTEXT) && (JERRY_EXTERNAL_CONTEXT == 1) */
   return ret_code;
 } /* main */

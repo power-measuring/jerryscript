@@ -119,7 +119,6 @@ handler_construct_2_freecb (void *native_p)
   test_api_is_free_callback_was_called = true;
 } /* handler_construct_2_freecb */
 
-
 /**
  * The name of the jerry_object_native_info_t struct.
  */
@@ -160,19 +159,31 @@ handler_construct (const jerry_value_t func_obj_val, /**< function object */
   jerry_release_value (res);
   jerry_release_value (field_name);
 
+  /* Set a native pointer. */
   jerry_set_object_native_pointer (this_val,
                                    (void *) 0x0000000000000000ull,
                                    &JERRY_NATIVE_HANDLE_INFO_FOR_CTYPE (bind1));
 
+  /* Check that the native pointer was set. */
   void *ptr = NULL;
   bool is_ok = jerry_get_object_native_pointer (this_val, &ptr, &JERRY_NATIVE_HANDLE_INFO_FOR_CTYPE (bind1));
   TEST_ASSERT (is_ok
                && (uintptr_t) ptr == (uintptr_t) 0x0000000000000000ull);
-  /* check if setting handle for second time is handled correctly */
+
+  /* Set a second native pointer. */
   jerry_set_object_native_pointer (this_val,
                                    (void *) 0x0012345678abcdefull,
                                    &JERRY_NATIVE_HANDLE_INFO_FOR_CTYPE (bind2));
 
+  /* Check that a second native pointer was set. */
+  is_ok = jerry_get_object_native_pointer (this_val, &ptr, &JERRY_NATIVE_HANDLE_INFO_FOR_CTYPE (bind2));
+  TEST_ASSERT (is_ok
+               && (uintptr_t) ptr == (uintptr_t) 0x0012345678abcdefull);
+
+  /* Check that the first native pointer is still set. */
+  is_ok = jerry_get_object_native_pointer (this_val, &ptr, &JERRY_NATIVE_HANDLE_INFO_FOR_CTYPE (bind1));
+  TEST_ASSERT (is_ok
+               && (uintptr_t) ptr == (uintptr_t) 0x0000000000000000ull);
   return jerry_create_boolean (true);
 } /* handler_construct */
 
@@ -259,8 +270,6 @@ foreach (const jerry_value_t name, /**< field name */
 
   TEST_ASSERT (false);
   return false;
-
-
 } /* foreach */
 
 static bool
@@ -674,10 +683,34 @@ main (void)
   jerry_release_value (prim_val);
 
   /* Test: jerry_get_prototype */
+  proto_val = jerry_get_prototype (jerry_create_undefined ());
+  TEST_ASSERT (jerry_value_is_error (proto_val));
+  jerry_value_t error = jerry_get_value_from_error (proto_val, true);
+  TEST_ASSERT (jerry_get_error_type (error) == JERRY_ERROR_TYPE);
+  jerry_release_value (error);
+
   proto_val = jerry_get_prototype (obj_val);
   TEST_ASSERT (!jerry_value_is_error (proto_val));
   TEST_ASSERT (jerry_value_is_object (proto_val));
+  jerry_release_value (proto_val);
   jerry_release_value (obj_val);
+
+  if (jerry_is_feature_enabled (JERRY_FEATURE_PROXY))
+  {
+    /* Note: update this test when the internal method is implemented */
+    jerry_value_t target = jerry_create_object ();
+    jerry_value_t handler = jerry_create_object ();
+    jerry_value_t proxy = jerry_create_proxy (target, handler);
+
+    jerry_release_value (target);
+    jerry_release_value (handler);
+    proto_val = jerry_get_prototype (proxy);
+    TEST_ASSERT (jerry_value_is_error (proto_val));
+    error = jerry_get_value_from_error (proto_val, true);
+    TEST_ASSERT (jerry_get_error_type (error) == JERRY_ERROR_TYPE);
+    jerry_release_value (error);
+    jerry_release_value (proxy);
+  }
 
   /* Test: jerry_set_prototype */
   obj_val = jerry_create_object ();
@@ -686,7 +719,9 @@ main (void)
   TEST_ASSERT (jerry_value_is_boolean (res));
   TEST_ASSERT (jerry_get_boolean_value (res));
 
-  res = jerry_set_prototype (obj_val, jerry_create_object ());
+  jerry_value_t new_proto = jerry_create_object ();
+  res = jerry_set_prototype (obj_val, new_proto);
+  jerry_release_value (new_proto);
   TEST_ASSERT (!jerry_value_is_error (res));
   TEST_ASSERT (jerry_value_is_boolean (res));
   TEST_ASSERT (jerry_get_boolean_value (res));
@@ -695,6 +730,25 @@ main (void)
   TEST_ASSERT (jerry_value_is_object (proto_val));
   jerry_release_value (proto_val);
   jerry_release_value (obj_val);
+
+  if (jerry_is_feature_enabled (JERRY_FEATURE_PROXY))
+  {
+    /* Note: update this test when the internal method is implemented */
+    jerry_value_t target = jerry_create_object ();
+    jerry_value_t handler = jerry_create_object ();
+    jerry_value_t proxy = jerry_create_proxy (target, handler);
+
+    jerry_release_value (target);
+    jerry_release_value (handler);
+    new_proto = jerry_create_object ();
+    res = jerry_set_prototype (proxy, new_proto);
+    jerry_release_value (new_proto);
+    TEST_ASSERT (jerry_value_is_error (res));
+    error = jerry_get_value_from_error (res, true);
+    TEST_ASSERT (jerry_get_error_type (error) == JERRY_ERROR_TYPE);
+    jerry_release_value (error);
+    jerry_release_value (proxy);
+  }
 
   /* Test: eval */
   const jerry_char_t eval_code_src1[] = "(function () { return 123; })";
@@ -715,7 +769,7 @@ main (void)
   jerry_release_value (global_obj_val);
 
   /* Test: run gc. */
-  jerry_gc (JERRY_GC_SEVERITY_LOW);
+  jerry_gc (JERRY_GC_PRESSURE_LOW);
 
   /* Test: spaces */
   const jerry_char_t eval_code_src2[] = "\x0a \x0b \x0c \xc2\xa0 \xe2\x80\xa8 \xe2\x80\xa9 \xef\xbb\xbf 4321";
@@ -793,6 +847,47 @@ main (void)
     jerry_cleanup ();
   }
 
+  /* Test parsing/executing scripts with lexically scoped global variables multiple times. */
+  if (jerry_is_feature_enabled (JERRY_FEATURE_SYMBOL))
+  {
+    jerry_init (JERRY_INIT_EMPTY);
+    const jerry_char_t scoped_src_p[] = "let a;";
+    jerry_value_t parse_result = jerry_parse (NULL,
+                                              0,
+                                              scoped_src_p,
+                                              sizeof (scoped_src_p) - 1,
+                                              JERRY_PARSE_NO_OPTS);
+    TEST_ASSERT (!jerry_value_is_error (parse_result));
+    jerry_release_value (parse_result);
+
+    parse_result = jerry_parse (NULL,
+                                0,
+                                scoped_src_p,
+                                sizeof (scoped_src_p) - 1,
+                                JERRY_PARSE_NO_OPTS);
+    TEST_ASSERT (!jerry_value_is_error (parse_result));
+
+    jerry_value_t run_result = jerry_run (parse_result);
+    TEST_ASSERT (!jerry_value_is_error (run_result));
+    jerry_release_value (run_result);
+
+    /* Should be a syntax error due to redeclaration. */
+    run_result = jerry_run (parse_result);
+    TEST_ASSERT (jerry_value_is_error (run_result));
+    jerry_release_value (run_result);
+    jerry_release_value (parse_result);
+
+    /* The variable should have no effect on parsing. */
+    parse_result = jerry_parse (NULL,
+                                0,
+                                scoped_src_p,
+                                sizeof (scoped_src_p) - 1,
+                                JERRY_PARSE_NO_OPTS);
+    TEST_ASSERT (!jerry_value_is_error (parse_result));
+    jerry_release_value (parse_result);
+    jerry_cleanup ();
+  }
+
   /* Test: parser error location */
   if (jerry_is_feature_enabled (JERRY_FEATURE_ERROR_MESSAGES))
   {
@@ -815,7 +910,49 @@ main (void)
     jerry_release_value (err_str_val);
     jerry_release_value (parsed_code_val);
     TEST_ASSERT (!strcmp ((char *) err_str_buf,
-                          "SyntaxError: Primary expression expected. [line: 2, column: 10]"));
+                          "SyntaxError: Primary expression expected. [<anonymous>:2:10]"));
+
+    const jerry_char_t file_str[] = "filename.js";
+    parsed_code_val = jerry_parse (file_str,
+                                   sizeof (file_str) - 1,
+                                   parser_err_src,
+                                   sizeof (parser_err_src) - 1,
+                                   JERRY_PARSE_NO_OPTS);
+    TEST_ASSERT (jerry_value_is_error (parsed_code_val));
+    parsed_code_val = jerry_get_value_from_error (parsed_code_val, true);
+    err_str_val = jerry_value_to_string (parsed_code_val);
+    err_str_size = jerry_get_string_size (err_str_val);
+
+    sz = jerry_string_to_char_buffer (err_str_val, err_str_buf, err_str_size);
+    err_str_buf[sz] = 0;
+
+    jerry_release_value (err_str_val);
+    jerry_release_value (parsed_code_val);
+    TEST_ASSERT (!strcmp ((char *) err_str_buf,
+                          "SyntaxError: Primary expression expected. [filename.js:2:10]"));
+
+    const jerry_char_t eval_err_src[] = "eval(\"var b;\\nfor (,); \");";
+    parsed_code_val = jerry_parse (file_str,
+                                   sizeof (file_str),
+                                   eval_err_src,
+                                   sizeof (eval_err_src) - 1,
+                                   JERRY_PARSE_NO_OPTS);
+    TEST_ASSERT (!jerry_value_is_error (parsed_code_val));
+
+    res = jerry_run (parsed_code_val);
+    TEST_ASSERT (jerry_value_is_error (res));
+    res = jerry_get_value_from_error (res, true);
+    err_str_val = jerry_value_to_string (res);
+    err_str_size = jerry_get_string_size (err_str_val);
+
+    sz = jerry_string_to_char_buffer (err_str_val, err_str_buf, err_str_size);
+    err_str_buf[sz] = 0;
+
+    jerry_release_value (err_str_val);
+    jerry_release_value (parsed_code_val);
+    jerry_release_value (res);
+    TEST_ASSERT (!strcmp ((char *) err_str_buf,
+                          "SyntaxError: Primary expression expected. [<eval>:2:6]"));
 
     jerry_cleanup ();
   }
@@ -848,7 +985,7 @@ main (void)
   cesu8_length = jerry_get_string_length (args[0]);
   cesu8_sz = jerry_get_string_size (args[0]);
 
-  char string_console[cesu8_sz];
+  JERRY_VLA (char, string_console, cesu8_sz);
   jerry_string_to_char_buffer (args[0], (jerry_char_t *) string_console, cesu8_sz);
 
   TEST_ASSERT (!strncmp (string_console, "console", cesu8_sz));
@@ -869,7 +1006,7 @@ main (void)
   cesu8_length = jerry_get_string_length (args[1]);
   cesu8_sz = jerry_get_string_size (args[1]);
 
-  char string_greek_zero_sign[cesu8_sz];
+  JERRY_VLA (char, string_greek_zero_sign, cesu8_sz);
   jerry_string_to_char_buffer (args[1], (jerry_char_t *) string_greek_zero_sign, cesu8_sz);
 
   TEST_ASSERT (!strncmp (string_greek_zero_sign, "\xed\xa0\x80\xed\xb6\x8a", cesu8_sz));
@@ -889,8 +1026,8 @@ main (void)
     jerry_release_value (has_prop_js);
     jerry_value_t parsed_data = jerry_get_property (parsed_json, key);
     TEST_ASSERT (jerry_value_is_string (parsed_data)== true);
-    jerry_size_t buff_size = (jerry_size_t) jerry_get_string_length (parsed_data);
-    char buff[buff_size + 1];
+    jerry_size_t buff_size = jerry_get_string_size (parsed_data);
+    JERRY_VLA (char, buff, buff_size + 1);
     jerry_string_to_char_buffer (parsed_data, (jerry_char_t *) buff, buff_size);
     buff[buff_size] = '\0';
     TEST_ASSERT (strcmp (data_check, buff) == false);
@@ -911,10 +1048,10 @@ main (void)
     jerry_release_value (res);
     jerry_value_t stringified = jerry_json_stringify (obj);
     TEST_ASSERT (jerry_value_is_string (stringified));
-    char buff[jerry_get_string_length (stringified)];
-    jerry_string_to_char_buffer (stringified, (jerry_char_t *) buff,
-                                (jerry_size_t) jerry_get_string_length (stringified));
-    buff[jerry_get_string_length (stringified)] = '\0';
+    jerry_size_t buff_size = jerry_get_string_size (stringified);
+    JERRY_VLA (char, buff, buff_size + 1);
+    jerry_string_to_char_buffer (stringified, (jerry_char_t *) buff, buff_size);
+    buff[buff_size] = '\0';
     TEST_ASSERT (strcmp ((const char *) check_value, (const char *) buff)  == 0);
     jerry_release_value (stringified);
     jerry_release_value (obj);

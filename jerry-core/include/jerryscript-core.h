@@ -34,12 +34,17 @@ extern "C"
 /**
  * Major version of JerryScript API.
  */
-#define JERRY_API_MAJOR_VERSION 1
+#define JERRY_API_MAJOR_VERSION 2
 
 /**
  * Minor version of JerryScript API.
  */
-#define JERRY_API_MINOR_VERSION 0
+#define JERRY_API_MINOR_VERSION 2
+
+/**
+ * Patch version of JerryScript API.
+ */
+#define JERRY_API_PATCH_VERSION 0
 
 /**
  * JerryScript init flags.
@@ -94,6 +99,7 @@ typedef enum
   JERRY_FEATURE_LOGGING, /**< logging */
   JERRY_FEATURE_SYMBOL, /**< symbol support */
   JERRY_FEATURE_DATAVIEW, /**< DataView support */
+  JERRY_FEATURE_PROXY, /**< Proxy support */
   JERRY_FEATURE__COUNT /**< number of features. NOTE: must be at the end of the list */
 } jerry_feature_t;
 
@@ -111,10 +117,10 @@ typedef enum
  */
 typedef enum
 {
-  JERRY_GC_SEVERITY_LOW, /**< free unused objects, but keep memory
+  JERRY_GC_PRESSURE_LOW, /**< free unused objects, but keep memory
                           *   allocated for performance improvements
                           *   such as property hash tables for large objects */
-  JERRY_GC_SEVERITY_HIGH /**< free as much memory as possible */
+  JERRY_GC_PRESSURE_HIGH /**< free as much memory as possible */
 } jerry_gc_mode_t;
 
 /**
@@ -322,6 +328,11 @@ typedef enum
   JERRY_BIN_OP_GREATER,       /**< greater relation (>) */
   JERRY_BIN_OP_GREATER_EQUAL, /**< greater or equal relation (>=)*/
   JERRY_BIN_OP_INSTANCEOF,    /**< instanceof operation */
+  JERRY_BIN_OP_ADD,           /**< addition operator (+) */
+  JERRY_BIN_OP_SUB,           /**< subtraction operator (-) */
+  JERRY_BIN_OP_MUL,           /**< multiplication operator (*) */
+  JERRY_BIN_OP_DIV,           /**< division operator (/) */
+  JERRY_BIN_OP_REM,           /**< remainder operator (%) */
 } jerry_binary_operation_t;
 
 /**
@@ -369,6 +380,7 @@ bool jerry_value_is_number (const jerry_value_t value);
 bool jerry_value_is_null (const jerry_value_t value);
 bool jerry_value_is_object (const jerry_value_t value);
 bool jerry_value_is_promise (const jerry_value_t value);
+bool jerry_value_is_proxy (const jerry_value_t value);
 bool jerry_value_is_string (const jerry_value_t value);
 bool jerry_value_is_symbol (const jerry_value_t value);
 bool jerry_value_is_undefined (const jerry_value_t value);
@@ -483,6 +495,7 @@ jerry_value_t jerry_create_number_nan (void);
 jerry_value_t jerry_create_null (void);
 jerry_value_t jerry_create_object (void);
 jerry_value_t jerry_create_promise (void);
+jerry_value_t jerry_create_proxy (const jerry_value_t target, const jerry_value_t handler);
 jerry_value_t jerry_create_regexp (const jerry_char_t *pattern, uint16_t flags);
 jerry_value_t jerry_create_regexp_sz (const jerry_char_t *pattern, jerry_size_t pattern_size, uint16_t flags);
 jerry_value_t jerry_create_string_from_utf8 (const jerry_char_t *str_p);
@@ -497,15 +510,20 @@ jerry_value_t jerry_create_undefined (void);
  */
 jerry_value_t jerry_has_property (const jerry_value_t obj_val, const jerry_value_t prop_name_val);
 jerry_value_t jerry_has_own_property (const jerry_value_t obj_val, const jerry_value_t prop_name_val);
+bool jerry_has_internal_property (const jerry_value_t obj_val, const jerry_value_t prop_name_val);
 bool jerry_delete_property (const jerry_value_t obj_val, const jerry_value_t prop_name_val);
 bool jerry_delete_property_by_index (const jerry_value_t obj_val, uint32_t index);
+bool jerry_delete_internal_property (const jerry_value_t obj_val, const jerry_value_t prop_name_val);
 
 jerry_value_t jerry_get_property (const jerry_value_t obj_val, const jerry_value_t prop_name_val);
 jerry_value_t jerry_get_property_by_index (const jerry_value_t obj_val, uint32_t index);
+jerry_value_t jerry_get_internal_property (const jerry_value_t obj_val, const jerry_value_t prop_name_val);
 jerry_value_t jerry_set_property (const jerry_value_t obj_val, const jerry_value_t prop_name_val,
                                   const jerry_value_t value_to_set);
 jerry_value_t jerry_set_property_by_index (const jerry_value_t obj_val, uint32_t index,
                                            const jerry_value_t value_to_set);
+bool jerry_set_internal_property (const jerry_value_t obj_val, const jerry_value_t prop_name_val,
+                                  const jerry_value_t value_to_set);
 
 void jerry_init_property_descriptor_fields (jerry_property_descriptor_t *prop_desc_p);
 jerry_value_t jerry_define_own_property (const jerry_value_t obj_val,
@@ -545,9 +563,23 @@ bool jerry_foreach_object_property (const jerry_value_t obj_val, jerry_object_pr
                                     void *user_data_p);
 
 /**
- * Promise resolve/reject functions.
+ * Promise functions.
  */
 jerry_value_t jerry_resolve_or_reject_promise (jerry_value_t promise, jerry_value_t argument, bool is_resolve);
+
+/**
+ * Enum values representing various Promise states.
+ */
+typedef enum
+{
+  JERRY_PROMISE_STATE_NONE = 0u, /**< Invalid/Unknown state (possibly called on a non-promise object). */
+  JERRY_PROMISE_STATE_PENDING,   /**< Promise is in "Pending" state. */
+  JERRY_PROMISE_STATE_FULFILLED, /**< Promise is in "Fulfilled" state. */
+  JERRY_PROMISE_STATE_REJECTED,  /**< Promise is in "Rejected" state. */
+} jerry_promise_state_t;
+
+jerry_value_t jerry_get_promise_result (const jerry_value_t promise);
+jerry_promise_state_t jerry_get_promise_state (const jerry_value_t promise);
 
 /**
  * Symbol functions.
@@ -576,6 +608,8 @@ jerry_context_t *jerry_create_context (uint32_t heap_size, jerry_context_alloc_t
  */
 void jerry_set_vm_exec_stop_callback (jerry_vm_exec_stop_callback_t stop_cb, void *user_p, uint32_t frequency);
 jerry_value_t jerry_get_backtrace (uint32_t max_depth);
+jerry_value_t jerry_get_resource_name (const jerry_value_t value);
+jerry_value_t jerry_get_new_target (void);
 
 /**
  * Array buffer components.
@@ -595,6 +629,8 @@ jerry_length_t jerry_arraybuffer_read (const jerry_value_t value,
                                        jerry_length_t buf_size);
 jerry_length_t jerry_get_arraybuffer_byte_length (const jerry_value_t value);
 uint8_t *jerry_get_arraybuffer_pointer (const jerry_value_t value);
+jerry_value_t jerry_is_arraybuffer_detachable (const jerry_value_t value);
+jerry_value_t jerry_detach_arraybuffer (const jerry_value_t value);
 
 /**
  * DataView functions.
@@ -632,7 +668,6 @@ typedef enum
   JERRY_TYPEDARRAY_FLOAT32,
   JERRY_TYPEDARRAY_FLOAT64,
 } jerry_typedarray_type_t;
-
 
 bool jerry_value_is_typedarray (jerry_value_t value);
 jerry_value_t jerry_create_typedarray (jerry_typedarray_type_t type_name, jerry_length_t length);

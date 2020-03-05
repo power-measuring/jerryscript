@@ -36,6 +36,15 @@
  */
 #define ECMA_NULL_POINTER JMEM_CP_NULL
 
+#if defined (JMEM_CAN_STORE_POINTER_VALUE_DIRECTLY)
+
+/**
+ * JMEM_ALIGNMENT_LOG aligned pointers can be stored directly in ecma_value_t
+ */
+#define ECMA_VALUE_CAN_STORE_UINTPTR_VALUE_DIRECTLY
+
+#endif /* JMEM_CAN_STORE_POINTER_VALUE_DIRECTLY */
+
 /**
  * @}
  */
@@ -58,10 +67,11 @@ typedef enum
 {
   ECMA_STATUS_API_AVAILABLE     = (1u << 0), /**< api available */
   ECMA_STATUS_DIRECT_EVAL       = (1u << 1), /**< eval is called directly */
-#ifndef CONFIG_ECMA_PROPERTY_HASHMAP_DISABLE
-  ECMA_STATUS_HIGH_SEV_GC       = (1u << 2), /**< last gc run was a high severity run */
-#endif /* !CONFIG_ECMA_PROPERTY_HASHMAP_DISABLE */
+#if ENABLED (JERRY_PROPRETY_HASHMAP)
+  ECMA_STATUS_HIGH_PRESSURE_GC  = (1u << 2), /**< last gc was under high pressure */
+#endif /* ENABLED (JERRY_PROPRETY_HASHMAP) */
   ECMA_STATUS_EXCEPTION         = (1u << 3), /**< last exception is a normal exception */
+  ECMA_STATUS_ABORT             = (1u << 4), /**< last exception is an abort */
 } ecma_status_flag_t;
 
 /**
@@ -76,35 +86,42 @@ typedef enum
   ECMA_TYPE_SYMBOL = 4, /**< pointer to description of a symbol */
   ECMA_TYPE_DIRECT_STRING = 5, /**< directly encoded string values */
   ECMA_TYPE_ERROR = 7, /**< pointer to description of an error reference (only supported by C API) */
-  ECMA_TYPE_POINTER = ECMA_TYPE_ERROR, /**< a generic aligned pointer */
   ECMA_TYPE_SNAPSHOT_OFFSET = ECMA_TYPE_ERROR, /**< offset to a snapshot number/string */
   ECMA_TYPE___MAX = ECMA_TYPE_ERROR /** highest value for ecma types */
 } ecma_type_t;
 
-#ifdef JERRY_DEBUGGER
+#if ENABLED (JERRY_DEBUGGER)
 /**
  * Shift for scope chain index part in ecma_parse_opts
  */
 #define ECMA_PARSE_CHAIN_INDEX_SHIFT 16
-#endif
+#endif /* ENABLED (JERRY_DEBUGGER) */
 
 /**
- * Option flags for script parsing.
+ * Option flags for parser_parse_script and internal flags for global_status_flags in parser context.
  * Note:
- *      The enum members must be kept in sync with parser_general_flags_t
- *      The last 16 bits are reserved for scope chain index
+ *      the last 16 bits is reserved for internal parser flags, because the debugger uses these
+ *      16 bits to encode the scope chain skip index as well (see ECMA_PARSE_CHAIN_INDEX_SHIFT)
  */
 typedef enum
 {
   ECMA_PARSE_NO_OPTS = 0, /**< no options passed */
-  ECMA_PARSE_STRICT_MODE = (1u << 0), /**< enable strict mode */
-  ECMA_PARSE_DIRECT_EVAL = (1u << 1), /**< eval is called directly (ECMA-262 v5, 15.1.2.1.1) */
+  ECMA_PARSE_STRICT_MODE = (1u << 0), /**< enable strict mode, must be same as PARSER_IS_STRICT */
+  ECMA_PARSE_MODULE = (1u << 1), /**< module is parsed */
+  ECMA_PARSE_EVAL = (1u << 2), /**< eval is called */
+  ECMA_PARSE_DIRECT_EVAL = (1u << 3), /**< eval is called directly (ECMA-262 v5, 15.1.2.1.1) */
+
   /* These four status flags must be in this order. See PARSER_CLASS_PARSE_OPTS_OFFSET. */
-  ECMA_PARSE_CLASS_CONSTRUCTOR = (1u << 2), /**< a class constructor is being parsed (this value must be kept in
+  ECMA_PARSE_CLASS_CONSTRUCTOR = (1u << 4), /**< a class constructor is being parsed (this value must be kept in
                                              *   in sync with PARSER_CLASS_CONSTRUCTOR) */
-  ECMA_PARSE_HAS_SUPER = (1u << 3), /**< the current context has super reference */
-  ECMA_PARSE_HAS_IMPL_SUPER = (1u << 4), /**< the current context has implicit parent class */
-  ECMA_PARSE_HAS_STATIC_SUPER = (1u << 5), /**< the current context is a static class method */
+  ECMA_PARSE_HAS_SUPER = (1u << 5), /**< the current context has super reference */
+  ECMA_PARSE_HAS_IMPL_SUPER = (1u << 6), /**< the current context has implicit parent class */
+  ECMA_PARSE_HAS_STATIC_SUPER = (1u << 7), /**< the current context is a static class method */
+
+  ECMA_PARSE_CALLED_FROM_FUNCTION = (1u << 8), /**< a function body is parsed or the code is inside a function */
+  ECMA_PARSE_GENERATOR_FUNCTION = (1u << 9), /**< generator function is parsed */
+
+  /* These flags are internally used by the parser. */
 } ecma_parse_opts_t;
 
 /**
@@ -118,15 +135,6 @@ typedef uint32_t ecma_value_t;
  * Type for directly encoded integer numbers in JerryScript.
  */
 typedef int32_t ecma_integer_value_t;
-
-#if UINTPTR_MAX <= UINT32_MAX
-
-/**
- * JMEM_ALIGNMENT_LOG aligned pointers can be stored directly in ecma_value_t
- */
-#define ECMA_VALUE_CAN_STORE_UINTPTR_VALUE_DIRECTLY
-
-#endif /* UINTPTR_MAX <= UINT32_MAX */
 
 /**
  * Mask for ecma types in ecma_value_t
@@ -188,6 +196,9 @@ enum
   ECMA_VALUE_REGISTER_REF = ECMA_MAKE_VALUE (8), /**< register reference,
                                                   *   a special "base" value for vm */
   ECMA_VALUE_IMPLICIT_CONSTRUCTOR = ECMA_MAKE_VALUE (9), /**< special value for bound class constructors */
+  ECMA_VALUE_UNINITIALIZED = ECMA_MAKE_VALUE (10), /**< a special value for uninitialized let/const declarations */
+  ECMA_VALUE_SPREAD_ELEMENT = ECMA_MAKE_VALUE (11), /**< a special value for spread elements in array initialization
+                                                     *   or function call argument list */
 };
 
 #if !ENABLED (JERRY_NUMBER_TYPE_FLOAT64)
@@ -256,19 +267,9 @@ enum
   (JERRY_UNLIKELY ((value) == ECMA_VALUE_ERROR))
 
 /**
- * Representation for native external pointer
- */
-typedef uintptr_t ecma_external_pointer_t;
-
-/**
  * Callback which tells whether the ECMAScript execution should be stopped.
  */
 typedef ecma_value_t (*ecma_vm_exec_stop_callback_t) (void *user_p);
-
-/**
- * Function type for user context deallocation
- */
-typedef void (*ecma_user_context_deinit_t) (void *user_context_p);
 
 /**
  * Type of an external function handler.
@@ -300,33 +301,6 @@ typedef struct ecma_native_pointer_t
   ecma_object_native_info_t *info_p; /**< native info */
   struct ecma_native_pointer_t *next_p; /**< points to the next ecma_native_pointer_t element */
 } ecma_native_pointer_t;
-
-/**
- * Property's 'Writable' attribute's values description.
- */
-typedef enum
-{
-  ECMA_PROPERTY_NOT_WRITABLE, /**< property's 'Writable' attribute is false */
-  ECMA_PROPERTY_WRITABLE /**< property's 'Writable' attribute is true */
-} ecma_property_writable_value_t;
-
-/**
- * Property's 'Enumerable' attribute's values description.
- */
-typedef enum
-{
-  ECMA_PROPERTY_NOT_ENUMERABLE, /**< property's 'Enumerable' attribute is false */
-  ECMA_PROPERTY_ENUMERABLE /**< property's 'Enumerable' attribute is true */
-} ecma_property_enumerable_value_t;
-
-/**
- * Property's 'Configurable' attribute's values description.
- */
-typedef enum
-{
-  ECMA_PROPERTY_NOT_CONFIGURABLE, /**< property's 'Configurable' attribute is false */
-  ECMA_PROPERTY_CONFIGURABLE /**< property's 'Configurable' attribute is true */
-} ecma_property_configurable_value_t;
 
 /**
  * Property list:
@@ -364,16 +338,18 @@ typedef enum
                                        *   that are not indices */
   ECMA_LIST_ENUMERABLE = (1 << 1), /**< exclude non-enumerable properties */
   ECMA_LIST_PROTOTYPE = (1 << 2), /**< list properties from prototype chain */
-#if ENABLED (JERRY_ES2015_BUILTIN_SYMBOL)
-  ECMA_LIST_SYMBOLS = (1 << 3), /**< list symbol properties only */
-#endif /* ENABLED (JERRY_ES2015_BUILTIN_SYMBOL) */
+#if ENABLED (JERRY_ES2015)
+  ECMA_LIST_SYMBOLS = (1 << 3), /**< list symbol properties */
+  ECMA_LIST_SYMBOLS_ONLY = (1 << 4), /**< list symbol properties only */
+#endif /* ENABLED (JERRY_ES2015) */
+  ECMA_LIST_CONVERT_FAST_ARRAYS = (1 << 5), /**< after listing the properties convert
+                                             *   the fast access mode array back to normal array */
 } ecma_list_properties_options_t;
 
 /**
  * List enumerable properties and include the prototype chain.
  */
 #define ECMA_LIST_ENUMERABLE_PROTOTYPE (ECMA_LIST_ENUMERABLE | ECMA_LIST_PROTOTYPE)
-
 
 /**
  * Property type mask.
@@ -425,6 +401,15 @@ typedef enum
  * No attributes can be changed for this property.
  */
 #define ECMA_PROPERTY_FIXED 0
+
+/**
+ * Default flag of length property.
+ */
+#if ENABLED (JERRY_ES2015)
+#define ECMA_PROPERTY_FLAG_DEFAULT_LENGTH ECMA_PROPERTY_FLAG_CONFIGURABLE
+#else /* !ENABLED (JERRY_ES2015) */
+#define ECMA_PROPERTY_FLAG_DEFAULT_LENGTH ECMA_PROPERTY_FIXED
+#endif /* ENABLED (JERRY_ES2015) */
 
 /**
  * Shift for property name part.
@@ -514,16 +499,16 @@ typedef uint8_t ecma_property_t; /**< ecma_property_types_t (3 bit) and ecma_pro
  */
 typedef struct
 {
-#ifdef JERRY_CPOINTER_32_BIT
+#if ENABLED (JERRY_CPOINTER_32_BIT)
   jmem_cpointer_t next_property_cp; /**< next cpointer */
-#endif /* JERRY_CPOINTER_32_BIT */
+#endif /* ENABLED (JERRY_CPOINTER_32_BIT) */
   ecma_property_t types[ECMA_PROPERTY_PAIR_ITEM_COUNT]; /**< two property type slot. The first represent
                                                          *   the type of this property (e.g. property pair) */
-#ifdef JERRY_CPOINTER_32_BIT
+#if ENABLED (JERRY_CPOINTER_32_BIT)
   uint16_t padding; /**< an unused value */
-#else /* !JERRY_CPOINTER_32_BIT */
+#else /* !ENABLED (JERRY_CPOINTER_32_BIT) */
   jmem_cpointer_t next_property_cp; /**< next cpointer */
-#endif /* JERRY_CPOINTER_32_BIT */
+#endif /* ENABLED (JERRY_CPOINTER_32_BIT) */
 } ecma_property_header_t;
 
 /**
@@ -531,8 +516,8 @@ typedef struct
  */
 typedef struct
 {
-  jmem_cpointer_t getter_p; /**< pointer to getter object */
-  jmem_cpointer_t setter_p; /**< pointer to setter object */
+  jmem_cpointer_t getter_cp; /**< compressed pointer to getter object */
+  jmem_cpointer_t setter_cp; /**< compressed pointer to setter object */
 } ecma_getter_setter_pointers_t;
 
 /**
@@ -541,11 +526,11 @@ typedef struct
 typedef union
 {
   ecma_value_t value; /**< value of a property */
-#ifdef JERRY_CPOINTER_32_BIT
+#if ENABLED (JERRY_CPOINTER_32_BIT)
   jmem_cpointer_t getter_setter_pair_cp; /**< cpointer to getter setter pair */
-#else /* !JERRY_CPOINTER_32_BIT */
+#else /* !ENABLED (JERRY_CPOINTER_32_BIT) */
   ecma_getter_setter_pointers_t getter_setter_pair; /**< getter setter pair */
-#endif /* JERRY_CPOINTER_32_BIT */
+#endif /* ENABLED (JERRY_CPOINTER_32_BIT) */
 } ecma_property_value_t;
 
 /**
@@ -602,11 +587,6 @@ typedef struct
   ((ecma_property_value_t *) ECMA_PROPERTY_VALUE_DATA_PTR (property_p))
 
 /**
- * Depth limit for property search (maximum prototype chain depth).
- */
-#define ECMA_PROPERTY_SEARCH_DEPTH_LIMIT 128
-
-/**
  * Property reference. It contains the value pointer
  * for real, and the value itself for virtual properties.
  */
@@ -634,6 +614,7 @@ typedef enum
   ECMA_PROPERTY_GET_NO_OPTIONS = 0, /**< no option flags for ecma_op_object_get_property */
   ECMA_PROPERTY_GET_VALUE = 1u << 0, /**< fill virtual_value field for virtual properties */
   ECMA_PROPERTY_GET_EXT_REFERENCE = 1u << 1, /**< get extended reference to the property */
+  ECMA_PROPERTY_GET_HAS_OWN_PROP = 1u << 2, /**< internal [[HasOwnProperty]] method */
 } ecma_property_get_option_bits_t;
 
 /**
@@ -643,15 +624,13 @@ typedef enum
 {
   ECMA_OBJECT_TYPE_GENERAL = 0, /**< all objects that are not belongs to the sub-types below. */
   ECMA_OBJECT_TYPE_CLASS = 1, /**< Objects with class property */
-  ECMA_OBJECT_TYPE_FUNCTION = 2, /**< Function objects (15.3), created through 13.2 routine */
-  ECMA_OBJECT_TYPE_EXTERNAL_FUNCTION = 3, /**< External (host) function object */
-  ECMA_OBJECT_TYPE_ARRAY = 4, /**< Array object (15.4) */
-  ECMA_OBJECT_TYPE_BOUND_FUNCTION = 5, /**< Function objects (15.3), created through 15.3.4.5 routine */
-  ECMA_OBJECT_TYPE_PSEUDO_ARRAY  = 6, /**< Array-like object, such as Arguments object (10.6) */
-#if ENABLED (JERRY_ES2015_ARROW_FUNCTION)
-  ECMA_OBJECT_TYPE_ARROW_FUNCTION = 7, /**< arrow function objects */
-#endif /* ENABLED (JERRY_ES2015_ARROW_FUNCTION) */
-
+  ECMA_OBJECT_TYPE_ARRAY = 2, /**< Array object (15.4) */
+  ECMA_OBJECT_TYPE_PSEUDO_ARRAY  = 3, /**< Array-like object, such as Arguments object (10.6) */
+  ECMA_OBJECT_TYPE_PROXY  = 4, /**< Proxy object ECMAScript v6 26.2 */
+  /* Note: these 4 types must be in this order. See IsCallable operation.  */
+  ECMA_OBJECT_TYPE_FUNCTION = 5, /**< Function objects (15.3), created through 13.2 routine */
+  ECMA_OBJECT_TYPE_BOUND_FUNCTION = 6, /**< Function objects (15.3), created through 15.3.4.5 routine */
+  ECMA_OBJECT_TYPE_EXTERNAL_FUNCTION = 7, /**< External (host) function object */
   /* Types between 13-15 cannot have a built-in flag. See ecma_lexical_environment_type_t. */
 
   ECMA_OBJECT_TYPE__MAX /**< maximum value */
@@ -666,8 +645,10 @@ typedef enum
   ECMA_PSEUDO_ARRAY_TYPEDARRAY = 1, /**< TypedArray which does NOT need extra space to store length and offset */
   ECMA_PSEUDO_ARRAY_TYPEDARRAY_WITH_INFO = 2, /**< TypedArray which NEEDS extra space to store length and offset */
   ECMA_PSEUDO_ARRAY_ITERATOR = 3, /**< Array iterator object (ECMAScript v6, 22.1.5.1) */
-
-  ECMA_PSEUDO_ARRAY__MAX = ECMA_PSEUDO_ARRAY_ITERATOR /**< maximum value */
+  ECMA_PSEUDO_SET_ITERATOR = 4, /**< Set iterator object (ECMAScript v6, 23.2.5.1) */
+  ECMA_PSEUDO_MAP_ITERATOR = 5, /**< Map iterator object (ECMAScript v6, 23.1.5.1) */
+  ECMA_PSEUDO_STRING_ITERATOR = 6, /**< String iterator object (ECMAScript v6, 22.1.5.1) */
+  ECMA_PSEUDO_ARRAY__MAX = ECMA_PSEUDO_STRING_ITERATOR /**< maximum value */
 } ecma_pseudo_array_type_t;
 
 /**
@@ -688,17 +669,19 @@ typedef enum
   ECMA_LEXICAL_ENVIRONMENT_TYPE__MAX = ECMA_LEXICAL_ENVIRONMENT_SUPER_OBJECT_BOUND /**< maximum value */
 } ecma_lexical_environment_type_t;
 
-#if ENABLED (JERRY_ES2015_BUILTIN_ITERATOR)
+#if ENABLED (JERRY_ES2015)
+
 /**
  * Types of array iterators.
  */
 typedef enum
 {
-  ECMA_ARRAY_ITERATOR_KEYS, /**< List only key indices */
-  ECMA_ARRAY_ITERATOR_VALUES, /**< List only key values */
-  ECMA_ARRAY_ITERATOR_KEYS_VALUES, /**< List key indices and values */
+  ECMA_ITERATOR_KEYS, /**< List only key indices */
+  ECMA_ITERATOR_VALUES, /**< List only key values */
+  ECMA_ITERATOR_KEYS_VALUES, /**< List key indices and values */
 } ecma_array_iterator_type_t;
-#endif /* ENABLED (JERRY_ES2015_BUILTIN_ITERATOR) */
+
+#endif /* ENABLED (JERRY_ES2015) */
 
 /**
  * Offset for JERRY_CONTEXT (status_flags) top 8 bits.
@@ -748,19 +731,32 @@ typedef enum
 /**
  * Non closure flag for debugger.
  */
-#ifdef JERRY_DEBUGGER
-#define ECMA_OBJECT_FLAG_NON_CLOSURE 0x20
-#endif /* JERRY_DEBUGGER */
+#define ECMA_OBJECT_FLAG_BLOCK ECMA_OBJECT_FLAG_EXTENSIBLE
+
+/**
+ * Bitshift index for an ecma-object reference count field
+ */
+#define ECMA_OBJECT_REF_SHIFT 6
+
+/**
+ * Bitmask for an ecma-object reference count field
+ */
+#define ECMA_OBJECT_REF_MASK (((1u << 10) - 1) << ECMA_OBJECT_REF_SHIFT)
 
 /**
  * Value for increasing or decreasing the object reference counter.
  */
-#define ECMA_OBJECT_REF_ONE (1u << 6)
+#define ECMA_OBJECT_REF_ONE (1u << ECMA_OBJECT_REF_SHIFT)
 
 /**
- * Maximum value of the object reference counter (1023).
+ * Represents non-visited white object
  */
-#define ECMA_OBJECT_MAX_REF (0x3ffu << 6)
+#define ECMA_OBJECT_NON_VISITED (0x3ffu << ECMA_OBJECT_REF_SHIFT)
+
+/**
+ * Maximum value of the object reference counter (1022).
+ */
+#define ECMA_OBJECT_MAX_REF (ECMA_OBJECT_NON_VISITED - ECMA_OBJECT_REF_ONE)
 
 /**
  * Description of ECMA-object or lexical environment
@@ -771,18 +767,27 @@ typedef struct
   /** type : 4 bit : ecma_object_type_t or ecma_lexical_environment_type_t
                      depending on ECMA_OBJECT_FLAG_BUILT_IN_OR_LEXICAL_ENV
       flags : 2 bit : ECMA_OBJECT_FLAG_BUILT_IN_OR_LEXICAL_ENV,
-                      ECMA_OBJECT_FLAG_EXTENSIBLE or ECMA_OBJECT_FLAG_NON_CLOSURE
-      refs : 10 bit (max 1023) */
+                      ECMA_OBJECT_FLAG_EXTENSIBLE or ECMA_OBJECT_FLAG_BLOCK
+      refs : 10 bit (max 1022) */
   uint16_t type_flags_refs;
 
   /** next in the object chain maintained by the garbage collector */
   jmem_cpointer_t gc_next_cp;
 
   /** compressed pointer to property list or bound object */
-  jmem_cpointer_t property_list_or_bound_object_cp;
+  union
+  {
+    jmem_cpointer_t property_list_cp; /**< compressed pointer to object's
+                                       *  or declerative lexical environments's property list */
+    jmem_cpointer_t bound_object_cp;  /**< compressed pointer to lexical environments's the bound object */
+  } u1;
 
   /** object prototype or outer reference */
-  jmem_cpointer_t prototype_or_outer_reference_cp;
+  union
+  {
+    jmem_cpointer_t prototype_cp; /**< compressed pointer to the object's prototype  */
+    jmem_cpointer_t outer_reference_cp; /**< compressed pointer to the lexical environments's outer reference  */
+  } u2;
 } ecma_object_t;
 
 /**
@@ -834,6 +839,7 @@ typedef struct
       {
         ecma_value_t value; /**< value of the object (e.g. boolean, number, string, etc.) */
         uint32_t length; /**< length related property (e.g. length of ArrayBuffer) */
+        ecma_value_t target; /**< [[ProxyTarget]] internal property */
       } u;
     } class_prop;
 
@@ -842,7 +848,7 @@ typedef struct
      */
     struct
     {
-      ecma_value_t scope_cp; /**< function scope */
+      jmem_cpointer_tag_t scope_cp; /**< function scope */
       ecma_value_t bytecode_cp; /**< function byte code */
     } function;
 
@@ -852,7 +858,13 @@ typedef struct
     struct
     {
       uint32_t length; /**< length property value */
-      ecma_property_t length_prop; /**< length property */
+      union
+      {
+        ecma_property_t length_prop; /**< length property */
+        uint32_t hole_count; /**< number of array holes in a fast access mode array
+                              *   multiplied ECMA_FAST_ACCESS_HOLE_ONE */
+      } u;
+
     } array;
 
     /**
@@ -862,19 +874,20 @@ typedef struct
     {
       uint8_t type; /**< pseudo array type, e.g. Arguments, TypedArray, ArrayIterator */
       uint8_t extra_info; /**< extra information about the object.
-                           *   e.g. element_width_shift for typed arrays,
+                           *   e.g. the specific builtin id for typed arrays,
                            *        [[IterationKind]] property for %Iterator% */
       union
       {
         uint16_t length; /**< for arguments: length of names */
-        uint16_t class_id; /**< for typedarray: the specific class name */
+        uint16_t class_id; /**< for typedarray: the specific class name id */
         uint16_t iterator_index; /**< for %Iterator%: [[%Iterator%NextIndex]] property */
       } u1;
       union
       {
         ecma_value_t lex_env_cp; /**< for arguments: lexical environment */
         ecma_value_t arraybuffer; /**< for typedarray: internal arraybuffer */
-        ecma_value_t iterated_value_cp; /**< for %Iterator%: [[IteratedObject]] property */
+        ecma_value_t iterated_value; /**< for %Iterator%: [[IteratedObject]] property */
+        ecma_value_t spread_value; /**< for spread object: spreaded element */
       } u2;
     } pseudo_array;
 
@@ -901,6 +914,18 @@ typedef struct
 } ecma_extended_built_in_object_t;
 
 /**
+ * Alignment for the fast access mode array length.
+ * The real length is aligned up for allocating the underlying buffer.
+ */
+#define ECMA_FAST_ARRAY_ALIGNMENT (8)
+
+/**
+ * Align the length of the fast mode array to get the allocated size of the underlying buffer
+ */
+#define ECMA_FAST_ARRAY_ALIGN_LENGTH(length) \
+  (uint32_t) ((((length)) + ECMA_FAST_ARRAY_ALIGNMENT - 1) / ECMA_FAST_ARRAY_ALIGNMENT * ECMA_FAST_ARRAY_ALIGNMENT)
+
+/**
  * Compiled byte code data.
  */
 typedef struct
@@ -914,7 +939,7 @@ typedef struct
                                      *   If regexp, the other flags must be RE_FLAG... */
 } ecma_compiled_code_t;
 
-#ifdef JERRY_ENABLE_SNAPSHOT_EXEC
+#if ENABLED (JERRY_SNAPSHOT_EXEC)
 
 /**
  * Description of static function objects.
@@ -925,22 +950,20 @@ typedef struct
   const ecma_compiled_code_t *bytecode_p; /**< real byte code pointer */
 } ecma_static_function_t;
 
-#endif /* JERRY_ENABLE_SNAPSHOT_EXEC */
+#endif /* ENABLED (JERRY_SNAPSHOT_EXEC) */
 
-#if ENABLED (JERRY_ES2015_ARROW_FUNCTION)
+#if ENABLED (JERRY_ES2015)
 
 /**
  * Description of arrow function objects.
  */
 typedef struct
 {
-  ecma_object_t object; /**< object header */
+  ecma_extended_object_t header; /**< extended object header */
   ecma_value_t this_binding; /**< value of 'this' binding */
-  jmem_cpointer_t scope_cp; /**< function scope */
-  jmem_cpointer_t bytecode_cp; /**< function byte code */
 } ecma_arrow_function_t;
 
-#ifdef JERRY_ENABLE_SNAPSHOT_EXEC
+#if ENABLED (JERRY_SNAPSHOT_EXEC)
 
 /**
  * Description of static arrow function objects.
@@ -951,36 +974,37 @@ typedef struct
   const ecma_compiled_code_t *bytecode_p;
 } ecma_static_arrow_function_t;
 
-#endif /* JERRY_ENABLE_SNAPSHOT_EXEC */
+#endif /* ENABLED (JERRY_SNAPSHOT_EXEC) */
 
-#endif /* ENABLED (JERRY_ES2015_ARROW_FUNCTION) */
+#endif /* ENABLED (JERRY_ES2015) */
 
-#if ENABLED (JERRY_ES2015_BUILTIN_MAP)
-
+#if ENABLED (JERRY_ES2015_BUILTIN_CONTAINER)
 /**
- * Map item count of chunks
+ * Flags for container objects
  */
-#define ECMA_MAP_OBJECT_ITEM_COUNT 3
-
-/**
- * Description of Map objects.
- */
-typedef struct
+typedef enum
 {
-  ecma_extended_object_t header; /**< header part */
-  uint32_t size; /**< size of the map object */
-} ecma_map_object_t;
+  ECMA_CONTAINER_FLAGS_EMPTY = (0), /** empty flags */
+  ECMA_CONTAINER_FLAGS_WEAK = (1 << 0) /** container object is weak */
+} ecma_container_flags_t;
+#endif /* ENABLED (JERRY_ES2015_BUILTIN_CONTAINER) */
 
-/**
- * Description of Map memory chunk.
- */
-typedef struct
+typedef enum
 {
-  ecma_value_t items[ECMA_MAP_OBJECT_ITEM_COUNT + 1]; /**< the last item is always a pointer to the next chunk,
-                                                       *   the rest can be ECMA_VALUE_ARRAY_HOLE or any valid value. */
-} ecma_map_object_chunk_t;
+  ECMA_PROP_NO_OPTS = (0), /** empty property descriptor */
+  ECMA_PROP_IS_GET_DEFINED = (1 << 0), /** Is [[Get]] defined? */
+  ECMA_PROP_IS_SET_DEFINED = (1 << 1), /** Is [[Set]] defined? */
 
-#endif /* ENABLED (JERRY_ES2015_BUILTIN_MAP) */
+  ECMA_PROP_IS_CONFIGURABLE = (1 << 2), /** [[Configurable]] */
+  ECMA_PROP_IS_ENUMERABLE = (1 << 3), /** [[Enumerable]] */
+  ECMA_PROP_IS_WRITABLE = (1 << 4), /** [[Writable]] */
+  ECMA_PROP_IS_THROW = (1 << 5), /** Flag that controls failure handling */
+
+  ECMA_PROP_IS_VALUE_DEFINED = (1 << 6), /** Is [[Value]] defined? */
+  ECMA_PROP_IS_CONFIGURABLE_DEFINED = (1 << 7), /** Is [[Configurable]] defined? */
+  ECMA_PROP_IS_ENUMERABLE_DEFINED = (1 << 8), /** Is [[Enumerable]] defined? */
+  ECMA_PROP_IS_WRITABLE_DEFINED = (1 << 9), /** Is [[Writable]] defined? */
+} ecma_property_descriptor_status_flags_t;
 
 /**
  * Description of ECMA property descriptor
@@ -990,35 +1014,13 @@ typedef struct
  * Note:
  *      If a component of descriptor is undefined then corresponding
  *      field should contain it's default value.
+ *      The struct members must be in this order or keep in sync with ecma_property_flags_t and ECMA_IS_THROW flag.
  */
 typedef struct
 {
-  /** Is [[Value]] defined? */
-  unsigned int is_value_defined : 1;
 
-  /** Is [[Get]] defined? */
-  unsigned int is_get_defined : 1;
-
-  /** Is [[Set]] defined? */
-  unsigned int is_set_defined : 1;
-
-  /** Is [[Writable]] defined? */
-  unsigned int is_writable_defined : 1;
-
-  /** [[Writable]] */
-  unsigned int is_writable : 1;
-
-  /** Is [[Enumerable]] defined? */
-  unsigned int is_enumerable_defined : 1;
-
-  /** [[Enumerable]] */
-  unsigned int is_enumerable : 1;
-
-  /** Is [[Configurable]] defined? */
-  unsigned int is_configurable_defined : 1;
-
-  /** [[Configurable]] */
-  unsigned int is_configurable : 1;
+  /** any combination of ecma_property_descriptor_status_flags_t bits */
+  uint16_t flags;
 
   /** [[Value]] */
   ecma_value_t value;
@@ -1030,11 +1032,43 @@ typedef struct
   ecma_object_t *set_p;
 } ecma_property_descriptor_t;
 
+/**
+ * Bitfield which represents a namedata property options in an ecma_property_descriptor_t
+ * Attributes:
+ *  - is_get_defined, is_set_defined : false
+ *  - is_configurable, is_writable, is_enumerable : undefined (false)
+ *  - is_throw : undefined (false)
+ *  - is_value_defined : true
+ *  - is_configurable_defined, is_writable_defined, is_enumerable_defined : true
+ */
+#define ECMA_NAME_DATA_PROPERTY_DESCRIPTOR_BITS 0x3c0
+
+/**
+ * Bitmask to get a the physical property flags from an ecma_property_descriptor
+ */
+#define ECMA_PROPERTY_FLAGS_MASK 0x1c
+
+/**
+ * Flag that controls failure handling during defining property
+ *
+ * Note: This flags represents the [[DefineOwnProperty]] (P, Desc, Throw) 3rd argument
+ */
+#define ECMA_IS_THROW (1 << 5)
+
 #if !ENABLED (JERRY_NUMBER_TYPE_FLOAT64)
 /**
  * Description of an ecma-number
  */
 typedef float ecma_number_t;
+
+/**
+ * It makes possible to read/write an ecma_number_t as uint32_t without strict aliasing rule violation.
+ */
+typedef union
+{
+  ecma_number_t as_ecma_number_t;
+  uint32_t as_uint32_t;
+} ecma_number_accessor_t;
 
 #define DOUBLE_TO_ECMA_NUMBER_T(value) (ecma_number_t) (value)
 
@@ -1071,6 +1105,15 @@ typedef float ecma_number_t;
  * Description of an ecma-number
  */
 typedef double ecma_number_t;
+
+/**
+ * It makes possible to read/write an ecma_number_t as uint64_t without strict aliasing rule violation.
+ */
+typedef union
+{
+  ecma_number_t as_ecma_number_t;
+  uint64_t as_uint64_t;
+} ecma_number_accessor_t;
 
 #define DOUBLE_TO_ECMA_NUMBER_T(value) value
 
@@ -1142,6 +1185,26 @@ typedef double ecma_number_t;
  * See also: ECMA_262 v5, 15.7.3.2
  */
 # define ECMA_NUMBER_MAX_VALUE (FLT_MAX)
+/**
+ * Number.EPSILON
+ *
+ * See also: ECMA_262 v6, 20.1.2.1
+ */
+# define  ECMA_NUMBER_EPSILON ((ecma_number_t) 1.1920928955078125e-7)
+
+/**
+ * Number.MAX_SAFE_INTEGER
+ *
+ * See also: ECMA_262 v6, 20.1.2.6
+ */
+# define ECMA_NUMBER_MAX_SAFE_INTEGER ((ecma_number_t) 0xFFFFFF)
+
+/**
+ * Number.MIN_SAFE_INTEGER
+ *
+ * See also: ECMA_262 v6, 20.1.2.8
+ */
+# define ECMA_NUMBER_MIN_SAFE_INTEGER ((ecma_number_t) -0xFFFFFF)
 #elif ENABLED (JERRY_NUMBER_TYPE_FLOAT64)
 /**
  * Number.MAX_VALUE (i.e., the maximum value of ecma-number)
@@ -1149,12 +1212,34 @@ typedef double ecma_number_t;
  * See also: ECMA_262 v5, 15.7.3.2
  */
 # define ECMA_NUMBER_MAX_VALUE ((ecma_number_t) 1.7976931348623157e+308)
+
 /**
  * Number.MIN_VALUE (i.e., the smallest positive value of ecma-number)
  *
  * See also: ECMA_262 v5, 15.7.3.3
  */
 # define ECMA_NUMBER_MIN_VALUE ((ecma_number_t) 5e-324)
+
+/**
+ * Number.EPSILON
+ *
+ * See also: ECMA_262 v6, 20.1.2.1
+ */
+# define  ECMA_NUMBER_EPSILON ((ecma_number_t) 2.2204460492503130808472633361816e-16)
+
+/**
+ * Number.MAX_SAFE_INTEGER
+ *
+ * See also: ECMA_262 v6, 20.1.2.6
+ */
+# define ECMA_NUMBER_MAX_SAFE_INTEGER ((ecma_number_t) 0x1FFFFFFFFFFFFF)
+
+/**
+ * Number.MIN_SAFE_INTEGER
+ *
+ * See also: ECMA_262 v6, 20.1.2.8
+ */
+# define ECMA_NUMBER_MIN_SAFE_INTEGER ((ecma_number_t) -0x1FFFFFFFFFFFFF)
 #endif /* !ENABLED (JERRY_NUMBER_TYPE_FLOAT64) */
 
 /**
@@ -1212,57 +1297,36 @@ typedef double ecma_number_t;
  */
 #define ECMA_STRING_NOT_ARRAY_INDEX UINT32_MAX
 
-/*
- * Ecma-collection: a growable list of ecma-values. Currently the list is
- * a chain list, where appending new items at the end is cheap operation.
- *
- * Enumerating elements is also cheap, since each page is terminated by a
- * special ecma-value: collection-type. This type has a pointer to the next
- * chunk. The last chunk is terminated by a NULL pointer. There when the
- * next value is requested from the iterator it simply checks the next
- * memory location. If it is not a collection-type value, it returns with
- * the value. Otherwise it gets the start address of the next chunk, and
- * return the value there.
- *
- * The collection-type value is always the last item of a collection chunk,
- * even if the chunk is not completely filled with values (this is only true
- * for the last chunk). Each chunk must have at least one non collection-type
- * value as well.
- */
-
 /**
- * Collection flags.
- */
-typedef enum
-{
-  ECMA_COLLECTION_NO_REF_OBJECTS = (1u << 0), /**< do not increase the refcount of objects */
-  ECMA_COLLECTION_NO_COPY = (1u << 1), /**< do not copy values */
-} ecma_collection_flag_t;
-
-/**
- * Description of a collection's header.
+ * Ecma-collection: a growable list of ecma-values.
  */
 typedef struct
 {
-  jmem_cpointer_t first_chunk_cp; /**< compressed pointer to first chunk with collection's data */
-  jmem_cpointer_t last_chunk_cp; /**< compressed pointer to last chunk with collection's data */
-  ecma_length_t item_count; /**< number of items in the collection */
-} ecma_collection_header_t;
+  uint32_t item_count; /**< number of items in the collection */
+  uint32_t capacity; /**< number of items can be stored in the underlying buffer */
+  ecma_value_t *buffer_p; /**< underlying data buffer */
+} ecma_collection_t;
 
 /**
- * Maximum number of items stored by a collection chunk (excluding the last collection-type value).
+ * Initial capacity of an ecma-collection
  */
-#define ECMA_COLLECTION_CHUNK_ITEMS 5
+#define ECMA_COLLECTION_INITIAL_CAPACITY 4
 
 /**
- * Collection chunk item.
+ * Ecma-collenction grow factor when the collection underlying buffer need to be reallocated
  */
-typedef struct
-{
-  ecma_value_t items[ECMA_COLLECTION_CHUNK_ITEMS + 1]; /**< ecma-value list, where the last value is a special
-                                                        *   collection-type value which points to the next chunk,
-                                                        *   so the chunk area is enlarged by one for this value */
-} ecma_collection_chunk_t;
+#define ECMA_COLLECTION_GROW_FACTOR (ECMA_COLLECTION_INITIAL_CAPACITY * 2)
+
+/**
+ * Compute the total allocated size of the collection based on it's capacity
+ */
+#define ECMA_COLLECTION_ALLOCATED_SIZE(capacity) \
+  (uint32_t) (sizeof (ecma_collection_t) + (capacity * sizeof (ecma_value_t)))
+
+/**
+ * Initial allocated size of an ecma-collection
+ */
+#define ECMA_COLLECTION_INITIAL_SIZE ECMA_COLLECTION_ALLOCATED_SIZE (ECMA_COLLECTION_INITIAL_CAPACITY)
 
 /**
  * Direct string types (2 bit).
@@ -1279,11 +1343,11 @@ typedef enum
  * Maximum value of the immediate part of a direct magic string.
  * Must be compatible with the immediate property name.
  */
-#ifdef JERRY_CPOINTER_32_BIT
+#if ENABLED (JERRY_CPOINTER_32_BIT)
 #define ECMA_DIRECT_STRING_MAX_IMM 0x07ffffff
-#else /* !JERRY_CPOINTER_32_BIT */
+#else /* !ENABLED (JERRY_CPOINTER_32_BIT) */
 #define ECMA_DIRECT_STRING_MAX_IMM 0x0000ffff
-#endif /* JERRY_CPOINTER_32_BIT */
+#endif /* ENABLED (JERRY_CPOINTER_32_BIT) */
 
 /**
  * Shift for direct string value part in ecma_value_t.
@@ -1300,6 +1364,14 @@ typedef enum
  */
 #define ECMA_CREATE_DIRECT_STRING(type, value) \
   ((uintptr_t) (ECMA_TYPE_DIRECT_STRING | ((type) << ECMA_VALUE_SHIFT) | (value) << ECMA_DIRECT_STRING_SHIFT))
+
+/**
+ * Create an ecma direct string from the given number.
+ *
+ * Note: the given number must be less or equal than ECMA_DIRECT_STRING_MAX_IMM
+ */
+#define ECMA_CREATE_DIRECT_UINT32_STRING(uint32_number) \
+  ((ecma_string_t *) ECMA_CREATE_DIRECT_STRING (ECMA_DIRECT_STRING_UINT, (uintptr_t) uint32_number))
 
 /**
  * Checks whether the string is direct.
@@ -1337,8 +1409,10 @@ typedef enum
   (((uintptr_t) (string_p)) >> ECMA_DIRECT_STRING_SHIFT)
 
 /**
- * Identifier for ecma-string's actual data container
+ * Maximum number of bytes that a long-utf8-string is able to store
  */
+#define ECMA_STRING_SIZE_LIMIT UINT32_MAX
+
 typedef enum
 {
   ECMA_STRING_CONTAINER_HEAP_UTF8_STRING, /**< actual data is on the heap as an utf-8 (cesu8) string
@@ -1347,17 +1421,15 @@ typedef enum
                                                 *   maximum size is 2^32. */
   ECMA_STRING_CONTAINER_UINT32_IN_DESC, /**< actual data is UInt32-represeneted Number
                                              stored locally in the string's descriptor */
+  ECMA_STRING_CONTAINER_HEAP_ASCII_STRING, /**< actual data is on the heap as an ASCII string
+                                            *   maximum size is 2^16. */
   ECMA_STRING_CONTAINER_MAGIC_STRING_EX, /**< the ecma-string is equal to one of external magic strings */
 
   ECMA_STRING_CONTAINER_SYMBOL, /**< the ecma-string is a symbol */
 
   ECMA_STRING_CONTAINER_MAP_KEY, /**< the ecma-string is a map key string */
 
-  ECMA_STRING_LITERAL_NUMBER, /**< a literal number which is used solely by the literal storage
-                               *   so no string processing function supports this type except
-                               *   the ecma_deref_ecma_string function. */
-
-  ECMA_STRING_CONTAINER__MAX = ECMA_STRING_LITERAL_NUMBER /**< maximum value */
+  ECMA_STRING_CONTAINER__MAX = ECMA_STRING_CONTAINER_MAP_KEY /**< maximum value */
 } ecma_string_container_t;
 
 /**
@@ -1368,18 +1440,29 @@ typedef enum
 /**
  * Value for increasing or decreasing the reference counter.
  */
-#define ECMA_STRING_REF_ONE (1u << 3)
+#define ECMA_STRING_REF_ONE (1u << 4)
 
 /**
- * Maximum value of the reference counter (8191).
+ * Maximum value of the reference counter (4294967280).
  */
-#define ECMA_STRING_MAX_REF (0x1fffu << 3)
+#define ECMA_STRING_MAX_REF (0xFFFFFFF0)
 
 /**
- * Set reference counter to zero (for refs_and_container member below).
+ * Flag that identifies that the string is static which means it is stored in JERRY_CONTEXT (string_list_cp)
  */
-#define ECMA_STRING_SET_REF_TO_ONE(refs_and_container) \
-  ((uint16_t) (((refs_and_container) & ECMA_STRING_CONTAINER_MASK) | ECMA_STRING_REF_ONE))
+#define ECMA_STATIC_STRING_FLAG (1 << 3)
+
+/**
+ * Set an ecma-string as static string
+ */
+#define ECMA_SET_STRING_AS_STATIC(string_p) \
+  (string_p)->refs_and_container |= ECMA_STATIC_STRING_FLAG
+
+/**
+ * Checks whether the ecma-string is static string
+ */
+#define ECMA_STRING_IS_STATIC(string_p) \
+  ((string_p)->refs_and_container & ECMA_STATIC_STRING_FLAG)
 
 /**
  * Returns with the container type of a string.
@@ -1391,7 +1474,7 @@ typedef enum
  * Checks whether the reference counter is 1.
  */
 #define ECMA_STRING_IS_REF_EQUALS_TO_ONE(string_desc_p) \
-  (((string_desc_p)->refs_and_container >> 3) == 1)
+  (((string_desc_p)->refs_and_container >> 4) == 1)
 
 /**
  * ECMA string-value descriptor
@@ -1399,43 +1482,107 @@ typedef enum
 typedef struct
 {
   /** Reference counter for the string */
-  uint16_t refs_and_container;
-
-  /** Hash of the string (calculated from two last characters of the string) */
-  lit_string_hash_t hash;
+  uint32_t refs_and_container;
 
   /**
    * Actual data or identifier of it's place in container (depending on 'container' field)
    */
   union
   {
-    /**
-     * Actual data of an utf-8 string type
-     */
-    struct
-    {
-      uint16_t size; /**< size of this utf-8 string in bytes */
-      uint16_t length; /**< length of this utf-8 string in characters */
-    } utf8_string;
-
-    lit_utf8_size_t long_utf8_string_size; /**< size of this long utf-8 string in bytes */
-    uint32_t uint32_number; /**< uint32-represented number placed locally in the descriptor */
+    lit_string_hash_t hash; /**< hash of the ASCII/UTF8 string */
     uint32_t magic_string_ex_id; /**< identifier of an external magic string (lit_magic_string_ex_id_t) */
-    ecma_value_t lit_number; /**< number (see ECMA_STRING_LITERAL_NUMBER) */
-    uint32_t common_uint32_field; /**< for zeroing and comparison in some cases */
-    ecma_value_t symbol_descriptor; /**< symbol descriptor string-value */
-    ecma_value_t value; /**< original key value corresponds to the map key string */
+    uint32_t uint32_number; /**< uint32-represented number placed locally in the descriptor */
   } u;
 } ecma_string_t;
 
 /**
- * Long ECMA string-value descriptor
+ * ECMA ASCII string-value descriptor
  */
 typedef struct
 {
   ecma_string_t header; /**< string header */
-  lit_utf8_size_t long_utf8_string_length; /**< length of this long utf-8 string in bytes */
-} ecma_long_string_t;
+  uint16_t size; /**< size of this ASCII string in bytes */
+} ecma_ascii_string_t;
+
+/**
+ * ECMA long UTF8 string-value descriptor
+ */
+typedef struct
+{
+  ecma_string_t header; /**< string header */
+  uint16_t size; /**< size of this utf-8 string in bytes */
+  uint16_t length; /**< length of this utf-8 string in bytes */
+} ecma_utf8_string_t;
+
+/**
+ * ECMA UTF8 string-value descriptor
+ */
+typedef struct
+{
+  ecma_string_t header; /**< string header */
+  lit_utf8_size_t size; /**< size of this long utf-8 string in bytes */
+  lit_utf8_size_t length; /**< length of this long utf-8 string in bytes */
+} ecma_long_utf8_string_t;
+
+/**
+ * Get the start position of the string buffer of an ecma ASCII string
+ */
+#define ECMA_ASCII_STRING_GET_BUFFER(string_p) \
+  ((lit_utf8_byte_t *) ((lit_utf8_byte_t *) (string_p) +  sizeof (ecma_ascii_string_t)))
+
+/**
+ * Get the start position of the string buffer of an ecma UTF8 string
+ */
+#define ECMA_UTF8_STRING_GET_BUFFER(string_p) \
+  ((lit_utf8_byte_t *) ((lit_utf8_byte_t *) (string_p) +  sizeof (ecma_utf8_string_t)))
+
+/**
+ * Get the start position of the string buffer of an ecma long UTF8 string
+ */
+#define ECMA_LONG_UTF8_STRING_GET_BUFFER(string_p) \
+  ((lit_utf8_byte_t *) ((lit_utf8_byte_t *) (string_p) +  sizeof (ecma_long_utf8_string_t)))
+
+/**
+ * ECMA extended string-value descriptor
+ */
+typedef struct
+{
+  ecma_string_t header; /**< string header */
+
+  union
+  {
+    ecma_value_t symbol_descriptor; /**< symbol descriptor string-value */
+    ecma_value_t value; /**< original key value corresponds to the map key string */
+  } u;
+} ecma_extended_string_t;
+
+/**
+ * String builder header
+ */
+typedef struct
+{
+  lit_utf8_size_t current_size; /**< size of the data in the buffer */
+} ecma_stringbuilder_header_t;
+
+/**
+ * Get pointer to the beginning of the stored string in the string builder
+ */
+#define ECMA_STRINGBUILDER_STRING_PTR(header_p) \
+  ((lit_utf8_byte_t *) (((lit_utf8_byte_t *) header_p) + sizeof (ecma_ascii_string_t)))
+
+/**
+ * Get the size of the stored string in the string builder
+ */
+#define ECMA_STRINGBUILDER_STRING_SIZE(header_p) \
+  ((lit_utf8_size_t) (header_p->current_size - sizeof (ecma_ascii_string_t)))
+
+/**
+ * String builder handle
+ */
+typedef struct
+{
+  ecma_stringbuilder_header_t *header_p; /**< pointer to header */
+} ecma_stringbuilder_t;
 
 /**
  * Abort flag for error reference.
@@ -1461,7 +1608,7 @@ typedef struct
   ecma_value_t value; /**< referenced value */
 } ecma_error_reference_t;
 
-#ifndef CONFIG_ECMA_PROPERTY_HASHMAP_DISABLE
+#if ENABLED (JERRY_PROPRETY_HASHMAP)
 
 /**
  * The lowest state of the ecma_prop_hashmap_alloc_state counter.
@@ -1475,7 +1622,7 @@ typedef struct
  */
 #define ECMA_PROP_HASHMAP_ALLOC_MAX 4
 
-#endif /* !CONFIG_ECMA_PROPERTY_HASHMAP_DISABLE */
+#endif /* ENABLED (JERRY_PROPRETY_HASHMAP) */
 
 /**
  * Number of values in a literal storage item
@@ -1491,15 +1638,24 @@ typedef struct
   jmem_cpointer_t values[ECMA_LIT_STORAGE_VALUE_COUNT]; /**< list of values */
 } ecma_lit_storage_item_t;
 
-#ifndef CONFIG_ECMA_LCACHE_DISABLE
+/**
+ * Number storage item
+ */
+typedef struct
+{
+  jmem_cpointer_t next_cp; /**< cpointer ot next item */
+  jmem_cpointer_t values[ECMA_LIT_STORAGE_VALUE_COUNT]; /**< list of values */
+} ecma_number_storage_item_t;
+
+#if ENABLED (JERRY_LCACHE)
 /**
  * Container of an LCache entry identifier
  */
-#ifdef JERRY_CPOINTER_32_BIT
+#if ENABLED (JERRY_CPOINTER_32_BIT)
 typedef uint64_t ecma_lcache_hash_entry_id_t;
-#else /* !JERRY_CPOINTER_32_BIT */
+#else /* !ENABLED (JERRY_CPOINTER_32_BIT) */
 typedef uint32_t ecma_lcache_hash_entry_id_t;
-#endif /* JERRY_CPOINTER_32_BIT */
+#endif /* ENABLED (JERRY_CPOINTER_32_BIT) */
 
 /**
  * Entry of LCache hash table
@@ -1523,9 +1679,35 @@ typedef struct
  */
 #define ECMA_LCACHE_HASH_ROW_LENGTH 2
 
-#endif /* !CONFIG_ECMA_LCACHE_DISABLE */
+#endif /* ENABLED (JERRY_LCACHE) */
 
 #if ENABLED (JERRY_ES2015_BUILTIN_TYPEDARRAY)
+
+/**
+ * Function callback descriptor of a %TypedArray% object getter
+ */
+typedef ecma_number_t (*ecma_typedarray_getter_fn_t)(lit_utf8_byte_t *src);
+
+/**
+ * Function callback descriptor of a %TypedArray% object setter
+ */
+typedef void (*ecma_typedarray_setter_fn_t)(lit_utf8_byte_t *src, ecma_number_t value);
+
+/**
+ * Builtin id for the different types of TypedArray's
+ */
+typedef enum
+{
+  ECMA_INT8_ARRAY,          /**< Int8Array */
+  ECMA_UINT8_ARRAY,         /**< Uint8Array */
+  ECMA_UINT8_CLAMPED_ARRAY, /**< Uint8ClampedArray */
+  ECMA_INT16_ARRAY,         /**< Int16Array */
+  ECMA_UINT16_ARRAY,        /**< Uint16Array */
+  ECMA_INT32_ARRAY,         /**< Int32Array */
+  ECMA_UINT32_ARRAY,        /**< Uint32Array */
+  ECMA_FLOAT32_ARRAY,       /**< Float32Array */
+  ECMA_FLOAT64_ARRAY,       /**< Float64Array */
+} ecma_typedarray_type_t;
 
 /**
  * Extra information for ArrayBuffers.
@@ -1566,7 +1748,45 @@ typedef struct
   ecma_length_t array_length; /**< the array length */
 } ecma_extended_typedarray_object_t;
 
+/**
+ * General structure for query %TypedArray% object's properties.
+ **/
+typedef struct
+{
+  ecma_object_t *array_buffer_p; /**< pointer to the typedArray's [[ViewedArrayBuffer]] internal slot */
+  lit_utf8_byte_t *buffer_p; /**< pointer to the underlying raw data buffer.
+                              *   Note:
+                              *    - This address is increased by the [ByteOffset]] internal property.
+                              *    - This address must be used during indexed read/write operation. */
+  ecma_typedarray_type_t id; /**< [[TypedArrayName]] internal slot */
+  uint32_t length; /**< [[ByteLength]] internal slot */
+  ecma_length_t offset; /**< [[ByteOffset]] internal slot. */
+  uint8_t shift; /**< the element size shift in the typedArray */
+  uint8_t element_size; /**< element size based on [[TypedArrayName]] in Table 49 */
+} ecma_typedarray_info_t;
+
 #endif /* ENABLED (JERRY_ES2015_BUILTIN_TYPEDARRAY) */
+
+#if ENABLED (JERRY_ES2015)
+
+/**
+ * Executable (e.g. generator, async) object flags.
+ */
+typedef enum
+{
+  ECMA_EXECUTABLE_OBJECT_COMPLETED = (1u << 0), /**< executable object is completed and cannot be resumed */
+  ECMA_EXECUTABLE_OBJECT_RUNNING = (1u << 1), /**< executable object is currently running */
+  /* Generator specific flags. */
+  ECMA_GENERATOR_ITERATE_AND_YIELD = (1u << 2), /**< the generator performs a yield* operation */
+} ecma_executable_object_flags_t;
+
+/**
+ * Checks whether the executable object is waiting for resuming.
+ */
+#define ECMA_EXECUTABLE_OBJECT_IS_SUSPENDED(extra_info) \
+  (!((extra_info) & (ECMA_EXECUTABLE_OBJECT_COMPLETED | ECMA_EXECUTABLE_OBJECT_RUNNING)))
+
+#endif /* ENABLED (JERRY_ES2015) */
 
 #if ENABLED (JERRY_ES2015_BUILTIN_DATAVIEW)
 /**
@@ -1598,6 +1818,51 @@ typedef struct
  * Bitshift index for the symbol hash property
  */
 #define ECMA_SYMBOL_HASH_SHIFT 2
+
+#if (JERRY_STACK_LIMIT != 0)
+/**
+ * Check the current stack usage. If the limit is reached a RangeError is raised.
+ */
+#define ECMA_CHECK_STACK_USAGE() \
+do \
+{ \
+  if (ecma_get_current_stack_usage () > CONFIG_MEM_STACK_LIMIT) \
+  { \
+    return ecma_raise_range_error (ECMA_ERR_MSG ("Maximum call stack size exceeded.")); \
+  } \
+} while (0)
+#else /* JERRY_STACK_LIMIT == 0) */
+/**
+ * If the stack limit is unlimited, this check is an empty macro.
+ */
+#define ECMA_CHECK_STACK_USAGE()
+#endif /* (JERRY_STACK_LIMIT != 0) */
+
+/**
+ * Invalid object pointer which represents abrupt completion
+ */
+#define ECMA_OBJECT_POINTER_ERROR ((ecma_object_t *) 0x01)
+
+#if ENABLED (JERRY_ES2015_BUILTIN_PROXY)
+/**
+ * Description of Proxy objects.
+ */
+typedef struct
+{
+  ecma_object_t header; /**< header part */
+  ecma_value_t target; /**< [[ProxyTarget]] internal slot */
+  ecma_value_t handler; /**< [[ProxyHandler]] internal slot */
+} ecma_proxy_object_t;
+
+/**
+ * Description of Proxy objects.
+ */
+typedef struct
+{
+  ecma_extended_object_t header; /**< header part */
+  ecma_value_t proxy; /**< [[RevocableProxy]] internal slot */
+} ecma_revocable_proxy_object_t;
+#endif /* ENABLED (JERRY_ES2015_BUILTIN_PROXY) */
 
 /**
  * @}

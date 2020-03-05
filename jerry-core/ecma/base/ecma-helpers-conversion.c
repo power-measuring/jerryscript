@@ -46,9 +46,22 @@ typedef struct
 
 /**
  * Round high part of 128-bit integer to uint64_t
+ *
+ * @return rounded high to uint64_t
  */
-#define ECMA_UINT128_ROUND_HIGH_TO_UINT64(name) \
-  (name.hi + (name.lo >> 63u))
+static uint64_t
+ecma_round_high_to_uint64 (ecma_uint128_t *num_p)
+{
+  uint64_t masked_lo = num_p->lo & ~(1ULL << 63u);
+  uint64_t masked_hi = num_p->hi & 0x1;
+
+  if ((num_p->lo >> 63u != 0)
+      && (masked_lo > 0 || masked_hi != 0))
+  {
+    return (num_p->hi + 1);
+  }
+  return num_p->hi;
+} /* ecma_round_high_to_uint64 */
 
 /**
  * Check if 128-bit integer is zero
@@ -268,12 +281,86 @@ static const uint8_t ecma_uint4_clz[] = { 4, 3, 2, 2, 1, 1, 1, 1, 0, 0, 0, 0, 0,
 #define EPSILON 0.0000001
 
 /**
+ * ECMA-defined conversion from string to number for different radixes (2, 8, 16).
+ *
+ * See also:
+ *          ECMA-262 v5 9.3.1
+ *          ECMA-262 v6 7.1.3.1
+ *
+ * @return NaN - if the conversion fails
+ *         converted number - otherwise
+ */
+static ecma_number_t
+ecma_utf8_string_to_number_by_radix (const lit_utf8_byte_t *str_p, /**< utf-8 string */
+                                     const lit_utf8_byte_t *end_p, /**< end of utf-8 string  */
+                                     uint32_t radix) /**< radix */
+{
+  JERRY_ASSERT (radix == 2 || radix == 8 || radix == 16);
+  ecma_number_t num = ECMA_NUMBER_ZERO;
+
+#if ENABLED (JERRY_ES2015)
+  if (radix <= 8)
+  {
+    lit_code_point_t upper_limit = LIT_CHAR_0 + radix;
+
+    for (const lit_utf8_byte_t * iter_p = str_p;  iter_p <= end_p; iter_p++)
+    {
+      int32_t digit_value;
+
+      if (*iter_p >= LIT_CHAR_0 && *iter_p < upper_limit)
+      {
+        digit_value = (*iter_p - LIT_CHAR_0);
+      }
+      else
+      {
+        return ecma_number_make_nan ();
+      }
+
+      num = num * radix + (ecma_number_t) digit_value;
+    }
+
+    return num;
+  }
+#endif /* ENABLED (JERRY_ES2015) */
+
+  for (const lit_utf8_byte_t * iter_p = str_p; iter_p <= end_p; iter_p++)
+  {
+    int32_t digit_value;
+
+    if (*iter_p >= LIT_CHAR_0
+        && *iter_p <= LIT_CHAR_9)
+    {
+      digit_value = (*iter_p - LIT_CHAR_0);
+    }
+    else if (*iter_p >= LIT_CHAR_LOWERCASE_A
+            && *iter_p <= LIT_CHAR_LOWERCASE_F)
+    {
+      digit_value = 10 + (*iter_p - LIT_CHAR_LOWERCASE_A);
+    }
+    else if (*iter_p >= LIT_CHAR_UPPERCASE_A
+            && *iter_p <= LIT_CHAR_UPPERCASE_F)
+    {
+      digit_value = 10 + (*iter_p - LIT_CHAR_UPPERCASE_A);
+    }
+    else
+    {
+      return ecma_number_make_nan ();
+    }
+
+    num = num * radix + (ecma_number_t) digit_value;
+  }
+
+  return num;
+} /* ecma_utf8_string_to_number_by_radix */
+
+/**
  * ECMA-defined conversion of string to Number.
  *
  * See also:
  *          ECMA-262 v5, 9.3.1
  *
- * @return ecma-number
+ * @return NaN - if the conversion fails
+ *         converted number - otherwise
  */
 ecma_number_t
 ecma_utf8_string_to_number (const lit_utf8_byte_t *str_p, /**< utf-8 string */
@@ -286,102 +373,52 @@ ecma_utf8_string_to_number (const lit_utf8_byte_t *str_p, /**< utf-8 string */
     return ECMA_NUMBER_ZERO;
   }
 
-  const lit_utf8_byte_t *str_curr_p = str_p;
-  const lit_utf8_byte_t *str_end_p = str_p + str_size;
-  ecma_char_t code_unit;
+  ecma_string_trim_helper (&str_p, &str_size);
+  const lit_utf8_byte_t *end_p = str_p + (str_size - 1);
 
-  while (str_curr_p < str_end_p)
-  {
-    code_unit = lit_utf8_peek_next (str_curr_p);
-    if (lit_char_is_white_space (code_unit) || lit_char_is_line_terminator (code_unit))
-    {
-      lit_utf8_incr (&str_curr_p);
-    }
-    else
-    {
-      break;
-    }
-  }
-
-  const lit_utf8_byte_t *begin_p = str_curr_p;
-  str_curr_p = (lit_utf8_byte_t *) str_end_p;
-
-  while (str_curr_p > str_p)
-  {
-    code_unit = lit_utf8_peek_prev (str_curr_p);
-    if (lit_char_is_white_space (code_unit) || lit_char_is_line_terminator (code_unit))
-    {
-      lit_utf8_decr (&str_curr_p);
-    }
-    else
-    {
-      break;
-    }
-  }
-
-  const lit_utf8_byte_t *end_p = str_curr_p - 1;
-
-  if (begin_p > end_p)
+  if (str_size < 1)
   {
     return ECMA_NUMBER_ZERO;
   }
 
-  if ((end_p >= begin_p + 2)
-      && begin_p[0] == LIT_CHAR_0
-      && (begin_p[1] == LIT_CHAR_LOWERCASE_X
-          || begin_p[1] == LIT_CHAR_UPPERCASE_X))
+  if (end_p >= str_p + 2
+      && str_p[0] == LIT_CHAR_0)
   {
-    /* Hex literal handling */
-    begin_p += 2;
-
-    ecma_number_t num = ECMA_NUMBER_ZERO;
-
-    for (const lit_utf8_byte_t * iter_p = begin_p;
-         iter_p <= end_p;
-         iter_p++)
+    switch (LEXER_TO_ASCII_LOWERCASE (str_p[1]))
     {
-      int32_t digit_value;
-
-      if (*iter_p >= LIT_CHAR_0
-          && *iter_p <= LIT_CHAR_9)
+      case LIT_CHAR_LOWERCASE_X :
       {
-        digit_value = (*iter_p - LIT_CHAR_0);
+        return ecma_utf8_string_to_number_by_radix (str_p + 2, end_p, 16);
       }
-      else if (*iter_p >= LIT_CHAR_LOWERCASE_A
-               && *iter_p <= LIT_CHAR_LOWERCASE_F)
+      case LIT_CHAR_LOWERCASE_O :
       {
-        digit_value = 10 + (*iter_p - LIT_CHAR_LOWERCASE_A);
+        return ecma_utf8_string_to_number_by_radix (str_p + 2, end_p, 8);
       }
-      else if (*iter_p >= LIT_CHAR_UPPERCASE_A
-               && *iter_p <= LIT_CHAR_UPPERCASE_F)
+      case LIT_CHAR_LOWERCASE_B :
       {
-        digit_value = 10 + (*iter_p - LIT_CHAR_UPPERCASE_A);
+        return ecma_utf8_string_to_number_by_radix (str_p + 2, end_p, 2);
       }
-      else
+      default:
       {
-        return ecma_number_make_nan ();
+        break;
       }
-
-      num = num * 16 + (ecma_number_t) digit_value;
     }
-
-    return num;
   }
 
   bool sign = false; /* positive */
 
-  if (*begin_p == LIT_CHAR_PLUS)
+  if (*str_p == LIT_CHAR_PLUS)
   {
-    begin_p++;
+    str_p++;
   }
-  else if (*begin_p == LIT_CHAR_MINUS)
+  else if (*str_p == LIT_CHAR_MINUS)
   {
     sign = true; /* negative */
 
-    begin_p++;
+    str_p++;
   }
 
-  if (begin_p > end_p)
+  if (str_p > end_p)
   {
     return ecma_number_make_nan ();
   }
@@ -391,7 +428,7 @@ ecma_utf8_string_to_number (const lit_utf8_byte_t *str_p, /**< utf-8 string */
 
   JERRY_ASSERT (strlen ((const char *) infinity_zt_str_p) == 8);
 
-  if ((end_p - begin_p) == (8 - 1) && memcmp (infinity_zt_str_p, begin_p, 8) == 0)
+  if ((end_p - str_p) == (8 - 1) && memcmp (infinity_zt_str_p, str_p, 8) == 0)
   {
     return ecma_number_make_infinity (sign);
   }
@@ -402,15 +439,15 @@ ecma_utf8_string_to_number (const lit_utf8_byte_t *str_p, /**< utf-8 string */
   bool digit_seen = false;
 
   /* Parsing digits before dot (or before end of digits part if there is no dot in number) */
-  while (begin_p <= end_p)
+  while (str_p <= end_p)
   {
     int32_t digit_value;
 
-    if (*begin_p >= LIT_CHAR_0
-        && *begin_p <= LIT_CHAR_9)
+    if (*str_p >= LIT_CHAR_0
+        && *str_p <= LIT_CHAR_9)
     {
       digit_seen = true;
-      digit_value = (*begin_p - LIT_CHAR_0);
+      digit_value = (*str_p - LIT_CHAR_0);
     }
     else
     {
@@ -430,29 +467,29 @@ ecma_utf8_string_to_number (const lit_utf8_byte_t *str_p, /**< utf-8 string */
       }
     }
 
-    begin_p++;
+    str_p++;
   }
 
-  if (begin_p <= end_p
-      && *begin_p == LIT_CHAR_DOT)
+  if (str_p <= end_p
+      && *str_p == LIT_CHAR_DOT)
   {
-    begin_p++;
+    str_p++;
 
-    if (!digit_seen && begin_p > end_p)
+    if (!digit_seen && str_p > end_p)
     {
       return ecma_number_make_nan ();
     }
 
     /* Parsing number's part that is placed after dot */
-    while (begin_p <= end_p)
+    while (str_p <= end_p)
     {
       int32_t digit_value;
 
-      if (*begin_p >= LIT_CHAR_0
-          && *begin_p <= LIT_CHAR_9)
+      if (*str_p >= LIT_CHAR_0
+          && *str_p <= LIT_CHAR_9)
       {
         digit_seen = true;
-        digit_value = (*begin_p - LIT_CHAR_0);
+        digit_value = (*str_p - LIT_CHAR_0);
       }
       else
       {
@@ -470,7 +507,7 @@ ecma_utf8_string_to_number (const lit_utf8_byte_t *str_p, /**< utf-8 string */
         e--;
       }
 
-      begin_p++;
+      str_p++;
     }
   }
 
@@ -478,40 +515,40 @@ ecma_utf8_string_to_number (const lit_utf8_byte_t *str_p, /**< utf-8 string */
   int32_t e_in_lit = 0;
   bool e_in_lit_sign = false;
 
-  if (begin_p <= end_p
-      && (*begin_p == LIT_CHAR_LOWERCASE_E
-          || *begin_p == LIT_CHAR_UPPERCASE_E))
+  if (str_p <= end_p
+      && (*str_p == LIT_CHAR_LOWERCASE_E
+          || *str_p == LIT_CHAR_UPPERCASE_E))
   {
-    begin_p++;
+    str_p++;
 
-    if (!digit_seen || begin_p > end_p)
+    if (!digit_seen || str_p > end_p)
     {
       return ecma_number_make_nan ();
     }
 
-    if (*begin_p == LIT_CHAR_PLUS)
+    if (*str_p == LIT_CHAR_PLUS)
     {
-      begin_p++;
+      str_p++;
     }
-    else if (*begin_p == LIT_CHAR_MINUS)
+    else if (*str_p == LIT_CHAR_MINUS)
     {
       e_in_lit_sign = true;
-      begin_p++;
+      str_p++;
     }
 
-    if (begin_p > end_p)
+    if (str_p > end_p)
     {
       return ecma_number_make_nan ();
     }
 
-    while (begin_p <= end_p)
+    while (str_p <= end_p)
     {
       int32_t digit_value;
 
-      if (*begin_p >= LIT_CHAR_0
-          && *begin_p <= LIT_CHAR_9)
+      if (*str_p >= LIT_CHAR_0
+          && *str_p <= LIT_CHAR_9)
       {
-        digit_value = (*begin_p - LIT_CHAR_0);
+        digit_value = (*str_p - LIT_CHAR_0);
       }
       else
       {
@@ -530,7 +567,7 @@ ecma_utf8_string_to_number (const lit_utf8_byte_t *str_p, /**< utf-8 string */
         return sign ? -ECMA_NUMBER_ZERO : ECMA_NUMBER_ZERO;
       }
 
-      begin_p++;
+      str_p++;
     }
   }
 
@@ -556,12 +593,12 @@ ecma_utf8_string_to_number (const lit_utf8_byte_t *str_p, /**< utf-8 string */
     e_sign = false;
   }
 
-  if (begin_p <= end_p)
+  if (str_p <= end_p)
   {
     return ecma_number_make_nan ();
   }
 
-  JERRY_ASSERT (begin_p == end_p + 1);
+  JERRY_ASSERT (str_p == end_p + 1);
 
   if (fraction_uint64 == 0)
   {
@@ -650,7 +687,7 @@ ecma_utf8_string_to_number (const lit_utf8_byte_t *str_p, /**< utf-8 string */
 
   JERRY_ASSERT (ECMA_UINT128_CLZ_MAX63 (fraction_uint128) == 11);
 
-  fraction_uint64 = ECMA_UINT128_ROUND_HIGH_TO_UINT64 (fraction_uint128);
+  fraction_uint64 = ecma_round_high_to_uint64 (&fraction_uint128);
 
   return ecma_number_make_from_sign_mantissa_and_exponent (sign, fraction_uint64, binary_exponent);
 #elif !ENABLED (JERRY_NUMBER_TYPE_FLOAT64)
@@ -722,9 +759,7 @@ ecma_uint32_to_utf8_string (uint32_t value, /**< value to convert */
 uint32_t
 ecma_number_to_uint32 (ecma_number_t num) /**< ecma-number */
 {
-  if (ecma_number_is_nan (num)
-      || ecma_number_is_zero (num)
-      || ecma_number_is_infinity (num))
+  if (JERRY_UNLIKELY (ecma_number_is_zero (num) || !ecma_number_is_finite (num)))
   {
     return 0;
   }

@@ -24,6 +24,7 @@
 #include "ecma-function-object.h"
 #include "ecma-gc.h"
 #include "ecma-helpers.h"
+#include "ecma-iterator-object.h"
 #include "ecma-lcache.h"
 #include "ecma-lex-env.h"
 #include "ecma-objects.h"
@@ -43,12 +44,10 @@
  * @{
  */
 
-/*
- * Check VM recursion depth limit
+/**
+ * Special constant to represent direct eval code.
  */
-#ifdef VM_RECURSION_LIMIT
-JERRY_STATIC_ASSERT (VM_RECURSION_LIMIT > 0, vm_recursion_limit_must_be_greater_than_zero);
-#endif /* VM_RECURSION_LIMIT */
+#define VM_DIRECT_EVAL ((void *) 0x1)
 
 /**
  * Get the value of object[property].
@@ -61,6 +60,7 @@ vm_op_get_value (ecma_value_t object, /**< base object */
 {
   if (ecma_is_value_object (object))
   {
+    ecma_object_t *object_p = ecma_get_object_from_value (object);
     ecma_string_t *property_name_p = NULL;
 
     if (ecma_is_value_integer_number (property))
@@ -69,6 +69,22 @@ vm_op_get_value (ecma_value_t object, /**< base object */
 
       if (int_value >= 0 && int_value <= ECMA_DIRECT_STRING_MAX_IMM)
       {
+        if (ecma_get_object_type (object_p) == ECMA_OBJECT_TYPE_ARRAY)
+        {
+          ecma_extended_object_t *ext_object_p = (ecma_extended_object_t *) object_p;
+
+          if (JERRY_LIKELY (ecma_op_array_is_fast_array (ext_object_p)
+                            && (uint32_t) int_value < ext_object_p->u.array.length))
+          {
+            ecma_value_t *values_p = ECMA_GET_NON_NULL_POINTER (ecma_value_t, object_p->u1.property_list_cp);
+
+            if (JERRY_LIKELY (!ecma_is_value_array_hole (values_p[int_value])))
+            {
+              return ecma_fast_copy_value (values_p[int_value]);
+            }
+          }
+        }
+
         property_name_p = (ecma_string_t *) ECMA_CREATE_DIRECT_STRING (ECMA_DIRECT_STRING_UINT,
                                                                        (uintptr_t) int_value);
       }
@@ -78,17 +94,16 @@ vm_op_get_value (ecma_value_t object, /**< base object */
       property_name_p = ecma_get_string_from_value (property);
     }
 
-#if ENABLED (JERRY_ES2015_BUILTIN_SYMBOL)
+#if ENABLED (JERRY_ES2015)
     if (ecma_is_value_symbol (property))
     {
       property_name_p = ecma_get_symbol_from_value (property);
     }
-#endif /* ENABLED (JERRY_ES2015_BUILTIN_SYMBOL) */
+#endif /* ENABLED (JERRY_ES2015) */
 
     if (property_name_p != NULL)
     {
-#ifndef CONFIG_ECMA_LCACHE_DISABLE
-      ecma_object_t *object_p = ecma_get_object_from_value (object);
+#if ENABLED (JERRY_LCACHE)
       ecma_property_t *property_p = ecma_lcache_lookup (object_p, property_name_p);
 
       if (property_p != NULL &&
@@ -96,23 +111,23 @@ vm_op_get_value (ecma_value_t object, /**< base object */
       {
         return ecma_fast_copy_value (ECMA_PROPERTY_VALUE_PTR (property_p)->value);
       }
-#endif /* !CONFIG_ECMA_LCACHE_DISABLE */
+#endif /* ENABLED (JERRY_LCACHE) */
 
       /* There is no need to free the name. */
-      return ecma_op_object_get (ecma_get_object_from_value (object), property_name_p);
+      return ecma_op_object_get (object_p, property_name_p);
     }
   }
 
   if (JERRY_UNLIKELY (ecma_is_value_undefined (object) || ecma_is_value_null (object)))
   {
-#ifdef JERRY_ENABLE_ERROR_MESSAGES
+#if ENABLED (JERRY_ERROR_MESSAGES)
     ecma_value_t error_value = ecma_raise_standard_error_with_format (ECMA_ERROR_TYPE,
                                                                       "Cannot read property '%' of %",
                                                                       property,
                                                                       object);
-#else /* !JERRY_ENABLE_ERROR_MESSAGES */
+#else /* !ENABLED (JERRY_ERROR_MESSAGES) */
     ecma_value_t error_value = ecma_raise_type_error (NULL);
-#endif /* JERRY_ENABLE_ERROR_MESSAGES */
+#endif /* ENABLED (JERRY_ERROR_MESSAGES) */
     return error_value;
   }
 
@@ -144,6 +159,8 @@ vm_op_set_value (ecma_value_t object, /**< base object */
                  ecma_value_t value, /**< ecma value */
                  bool is_strict) /**< strict mode */
 {
+  ecma_object_t * object_p;
+
   if (JERRY_UNLIKELY (!ecma_is_value_object (object)))
   {
     ecma_value_t to_object = ecma_op_to_object (object);
@@ -151,9 +168,9 @@ vm_op_set_value (ecma_value_t object, /**< base object */
 
     if (ECMA_IS_VALUE_ERROR (to_object))
     {
-#ifdef JERRY_ENABLE_ERROR_MESSAGES
+#if ENABLED (JERRY_ERROR_MESSAGES)
       ecma_free_value (to_object);
-      ecma_free_value (JERRY_CONTEXT (error_value));
+      jcontext_release_exception ();
 
       ecma_value_t error_value = ecma_raise_standard_error_with_format (ECMA_ERROR_TYPE,
                                                                         "Cannot set property '%' of %",
@@ -162,17 +179,21 @@ vm_op_set_value (ecma_value_t object, /**< base object */
       ecma_free_value (property);
 
       return error_value;
-#else /* !JERRY_ENABLE_ERROR_MESSAGES */
+#else /* !ENABLED (JERRY_ERROR_MESSAGES) */
       ecma_free_value (property);
       return to_object;
-#endif /* JERRY_ENABLE_ERROR_MESSAGES */
+#endif /* ENABLED (JERRY_ERROR_MESSAGES) */
     }
 
-    object = to_object;
+    object_p = ecma_get_object_from_value (to_object);
+    ecma_op_ordinary_object_prevent_extensions (object_p);
+  }
+  else
+  {
+    object_p = ecma_get_object_from_value (object);
   }
 
   ecma_string_t *property_p;
-  ecma_object_t *object_p = ecma_get_object_from_value (object);
 
   if (!ecma_is_value_prop_name (property))
   {
@@ -219,7 +240,7 @@ vm_op_set_value (ecma_value_t object, /**< base object */
 /**
  * Decode table for both opcodes and extended opcodes.
  */
-static const uint16_t vm_decode_table[] JERRY_CONST_DATA =
+static const uint16_t vm_decode_table[] JERRY_ATTR_CONST_DATA =
 {
   CBC_OPCODE_LIST
   CBC_EXT_OPCODE_LIST
@@ -240,12 +261,15 @@ ecma_value_t
 vm_run_module (const ecma_compiled_code_t *bytecode_p, /**< pointer to bytecode to run */
                ecma_object_t *lex_env_p) /**< pointer to the specified lexenv to run in */
 {
-  ecma_object_t *glob_obj_p = ecma_builtin_get_global ();
+  const ecma_value_t module_init_result = ecma_module_initialize_current ();
+  if (ECMA_IS_VALUE_ERROR (module_init_result))
+  {
+    return module_init_result;
+  }
 
   return vm_run (bytecode_p,
-                 ecma_make_object_value (glob_obj_p),
+                 ECMA_VALUE_UNDEFINED,
                  lex_env_p,
-                 false,
                  NULL,
                  0);
 } /* vm_run_module */
@@ -264,10 +288,39 @@ vm_run_global (const ecma_compiled_code_t *bytecode_p) /**< pointer to bytecode 
 {
   ecma_object_t *glob_obj_p = ecma_builtin_get_global ();
 
+#if ENABLED (JERRY_ES2015)
+  if (bytecode_p->status_flags & CBC_CODE_FLAGS_LEXICAL_BLOCK_NEEDED)
+  {
+    ecma_create_global_lexical_block ();
+  }
+#endif /* ENABLED (JERRY_ES2015) */
+
+  ecma_object_t *const global_scope_p = ecma_get_global_scope ();
+
+#if ENABLED (JERRY_ES2015_MODULE_SYSTEM)
+  if (JERRY_CONTEXT (module_top_context_p) != NULL)
+  {
+    JERRY_ASSERT (JERRY_CONTEXT (module_top_context_p)->parent_p == NULL);
+    ecma_module_t *module_p = JERRY_CONTEXT (module_top_context_p)->module_p;
+
+    JERRY_ASSERT (module_p->scope_p == NULL);
+    ecma_ref_object (global_scope_p);
+    module_p->scope_p = global_scope_p;
+
+    const ecma_value_t module_init_result = ecma_module_initialize_current ();
+    ecma_module_cleanup ();
+    JERRY_CONTEXT (module_top_context_p) = NULL;
+
+    if (ECMA_IS_VALUE_ERROR (module_init_result))
+    {
+      return module_init_result;
+    }
+  }
+#endif /* ENABLED (JERRY_ES2015_MODULE_SYSTEM) */
+
   return vm_run (bytecode_p,
                  ecma_make_object_value (glob_obj_p),
-                 ecma_get_global_environment (),
-                 false,
+                 global_scope_p,
                  NULL,
                  0);
 } /* vm_run_global */
@@ -290,17 +343,18 @@ vm_run_eval (ecma_compiled_code_t *bytecode_data_p, /**< byte-code data */
     this_binding = ecma_copy_value (JERRY_CONTEXT (vm_top_context_p)->this_binding);
     lex_env_p = JERRY_CONTEXT (vm_top_context_p)->lex_env_p;
 
-#ifdef JERRY_DEBUGGER
+#if ENABLED (JERRY_DEBUGGER)
     uint32_t chain_index = parse_opts >> ECMA_PARSE_CHAIN_INDEX_SHIFT;
+    parse_opts &= (1 << ECMA_PARSE_CHAIN_INDEX_SHIFT) - 1;
 
     while (chain_index != 0)
     {
-      lex_env_p = ecma_get_lex_env_outer_reference (lex_env_p);
-
-      if (JERRY_UNLIKELY (lex_env_p == NULL))
+      if (JERRY_UNLIKELY (lex_env_p->u2.outer_reference_cp == JMEM_CP_NULL))
       {
         return ecma_raise_range_error (ECMA_ERR_MSG ("Invalid scope chain index for eval"));
       }
+
+      lex_env_p = ECMA_GET_NON_NULL_POINTER (ecma_object_t, lex_env_p->u2.outer_reference_cp);
 
       if ((ecma_get_lex_env_type (lex_env_p) == ECMA_LEXICAL_ENVIRONMENT_THIS_OBJECT_BOUND)
           || (ecma_get_lex_env_type (lex_env_p) == ECMA_LEXICAL_ENVIRONMENT_DECLARATIVE))
@@ -308,14 +362,14 @@ vm_run_eval (ecma_compiled_code_t *bytecode_data_p, /**< byte-code data */
         chain_index--;
       }
     }
-#endif
+#endif /* ENABLED (JERRY_DEBUGGER) */
   }
   else
   {
     ecma_object_t *global_obj_p = ecma_builtin_get_global ();
     ecma_ref_object (global_obj_p);
     this_binding = ecma_make_object_value (global_obj_p);
-    lex_env_p = ecma_get_global_environment ();
+    lex_env_p = ecma_get_global_scope ();
   }
 
   ecma_ref_object (lex_env_p);
@@ -323,29 +377,37 @@ vm_run_eval (ecma_compiled_code_t *bytecode_data_p, /**< byte-code data */
   if ((bytecode_data_p->status_flags & CBC_CODE_FLAGS_STRICT_MODE) != 0)
   {
     ecma_object_t *strict_lex_env_p = ecma_create_decl_lex_env (lex_env_p);
-    ecma_deref_object (lex_env_p);
 
+    ecma_deref_object (lex_env_p);
     lex_env_p = strict_lex_env_p;
+  }
+
+  if ((bytecode_data_p->status_flags & CBC_CODE_FLAGS_LEXICAL_BLOCK_NEEDED) != 0)
+  {
+    ecma_object_t *lex_block_p = ecma_create_decl_lex_env (lex_env_p);
+    lex_block_p->type_flags_refs |= (uint16_t) ECMA_OBJECT_FLAG_BLOCK;
+
+    ecma_deref_object (lex_env_p);
+    lex_env_p = lex_block_p;
   }
 
   ecma_value_t completion_value = vm_run (bytecode_data_p,
                                           this_binding,
                                           lex_env_p,
-                                          parse_opts,
-                                          NULL,
+                                          (parse_opts & ECMA_PARSE_DIRECT_EVAL) ? VM_DIRECT_EVAL : NULL,
                                           0);
 
   ecma_deref_object (lex_env_p);
   ecma_free_value (this_binding);
 
-#ifdef JERRY_ENABLE_SNAPSHOT_EXEC
+#if ENABLED (JERRY_SNAPSHOT_EXEC)
   if (!(bytecode_data_p->status_flags & CBC_CODE_FLAGS_STATIC_FUNCTION))
   {
     ecma_bytecode_deref (bytecode_data_p);
   }
-#else /* !JERRY_ENABLE_SNAPSHOT_EXEC */
+#else /* !ENABLED (JERRY_SNAPSHOT_EXEC) */
   ecma_bytecode_deref (bytecode_data_p);
-#endif /* JERRY_ENABLE_SNAPSHOT_EXEC */
+#endif /* ENABLED (JERRY_SNAPSHOT_EXEC) */
 
   return completion_value;
 } /* vm_run_eval */
@@ -361,20 +423,20 @@ vm_construct_literal_object (vm_frame_ctx_t *frame_ctx_p, /**< frame context */
 {
   ecma_compiled_code_t *bytecode_p;
 
-#ifdef JERRY_ENABLE_SNAPSHOT_EXEC
+#if ENABLED (JERRY_SNAPSHOT_EXEC)
   if (JERRY_LIKELY (!(frame_ctx_p->bytecode_header_p->status_flags & CBC_CODE_FLAGS_STATIC_FUNCTION)))
   {
-#endif /* JERRY_ENABLE_SNAPSHOT_EXEC */
+#endif /* ENABLED (JERRY_SNAPSHOT_EXEC) */
     bytecode_p = ECMA_GET_INTERNAL_VALUE_POINTER (ecma_compiled_code_t,
                                                   lit_value);
-#ifdef JERRY_ENABLE_SNAPSHOT_EXEC
+#if ENABLED (JERRY_SNAPSHOT_EXEC)
   }
   else
   {
     uint8_t *byte_p = ((uint8_t *) frame_ctx_p->bytecode_header_p) + lit_value;
     bytecode_p = (ecma_compiled_code_t *) byte_p;
   }
-#endif /* JERRY_ENABLE_SNAPSHOT_EXEC */
+#endif /* ENABLED (JERRY_SNAPSHOT_EXEC) */
 
 #if ENABLED (JERRY_BUILTIN_REGEXP)
   if (!(bytecode_p->status_flags & CBC_CODE_FLAGS_FUNCTION))
@@ -396,21 +458,24 @@ vm_construct_literal_object (vm_frame_ctx_t *frame_ctx_p, /**< frame context */
 
   ecma_object_t *func_obj_p;
 
-#if ENABLED (JERRY_ES2015_ARROW_FUNCTION)
-  if (!(bytecode_p->status_flags & CBC_CODE_FLAGS_ARROW_FUNCTION))
-  {
-#endif /* ENABLED (JERRY_ES2015_ARROW_FUNCTION) */
-    func_obj_p = ecma_op_create_function_object (frame_ctx_p->lex_env_p,
-                                                 bytecode_p);
-#if ENABLED (JERRY_ES2015_ARROW_FUNCTION)
-  }
-  else
+#if ENABLED (JERRY_ES2015)
+  if (bytecode_p->status_flags & CBC_CODE_FLAGS_ARROW_FUNCTION)
   {
     func_obj_p = ecma_op_create_arrow_function_object (frame_ctx_p->lex_env_p,
                                                        bytecode_p,
                                                        frame_ctx_p->this_binding);
   }
-#endif /* ENABLED (JERRY_ES2015_ARROW_FUNCTION) */
+  else if (bytecode_p->status_flags & CBC_CODE_FLAGS_GENERATOR)
+  {
+    func_obj_p = ecma_op_create_generator_function_object (frame_ctx_p->lex_env_p, bytecode_p);
+  }
+  else
+  {
+#endif /* ENABLED (JERRY_ES2015) */
+    func_obj_p = ecma_op_create_simple_function_object (frame_ctx_p->lex_env_p, bytecode_p);
+#if ENABLED (JERRY_ES2015)
+  }
+#endif /* ENABLED (JERRY_ES2015) */
 
   return ecma_make_object_value (func_obj_p);
 } /* vm_construct_literal_object */
@@ -450,7 +515,7 @@ static const uint8_t vm_error_byte_code_p[] =
   CBC_EXT_OPCODE, CBC_EXT_ERROR
 };
 
-#if ENABLED (JERRY_ES2015_CLASS)
+#if ENABLED (JERRY_ES2015)
 /**
  * 'super(...)' function call handler.
  */
@@ -460,26 +525,42 @@ vm_super_call (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
   JERRY_ASSERT (frame_ctx_p->call_operation == VM_EXEC_SUPER_CALL);
   JERRY_ASSERT (frame_ctx_p->byte_code_p[0] == CBC_EXT_OPCODE);
 
-  uint8_t *byte_code_p = frame_ctx_p->byte_code_p + 3;
+  const uint8_t *byte_code_p = frame_ctx_p->byte_code_p + 3;
   uint8_t opcode = byte_code_p[-2];
-  uint32_t arguments_list_len = byte_code_p[-1];
+  uint32_t arguments_list_len;
 
-  ecma_value_t *stack_top_p = frame_ctx_p->stack_top_p - arguments_list_len;
+  bool spread_arguments = opcode >= CBC_EXT_SPREAD_SUPER_CALL;
 
-  ecma_value_t func_value = stack_top_p[-1];
+  ecma_collection_t *collection_p = NULL;
+  ecma_value_t *arguments_p;
+
+  if (spread_arguments)
+  {
+    ecma_value_t collection = *(--frame_ctx_p->stack_top_p);
+    collection_p = ECMA_GET_INTERNAL_VALUE_POINTER (ecma_collection_t, collection);
+    arguments_p = collection_p->buffer_p;
+    arguments_list_len = collection_p->item_count;
+  }
+  else
+  {
+    arguments_list_len = byte_code_p[-1];
+    arguments_p = frame_ctx_p->stack_top_p;
+  }
+
+  ecma_value_t func_value = *(--frame_ctx_p->stack_top_p);
   ecma_value_t completion_value;
   ecma_op_set_super_called (frame_ctx_p->lex_env_p);
   ecma_value_t this_value = ecma_op_get_class_this_binding (frame_ctx_p->lex_env_p);
 
   if (!ecma_is_constructor (func_value))
   {
-    completion_value = ecma_raise_type_error ("Class extends value is not a constructor.");
+    completion_value = ecma_raise_type_error (ECMA_ERR_MSG ("Class extends value is not a constructor."));
   }
   else
   {
     completion_value = ecma_op_function_construct (ecma_get_object_from_value (func_value),
                                                    this_value,
-                                                   stack_top_p,
+                                                   arguments_p,
                                                    arguments_list_len);
 
     if (this_value != completion_value && ecma_is_value_object (completion_value))
@@ -492,20 +573,26 @@ vm_super_call (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
   /* Free registers. */
   for (uint32_t i = 0; i < arguments_list_len; i++)
   {
-    ecma_fast_free_value (stack_top_p[i]);
+    ecma_fast_free_value (arguments_p[i]);
   }
+
+  if (collection_p != NULL)
+  {
+    ecma_collection_destroy (collection_p);
+  }
+
+  ecma_free_value (func_value);
 
   if (JERRY_UNLIKELY (ECMA_IS_VALUE_ERROR (completion_value)))
   {
-#ifdef JERRY_DEBUGGER
+#if ENABLED (JERRY_DEBUGGER)
     JERRY_CONTEXT (debugger_exception_byte_code_p) = frame_ctx_p->byte_code_p;
-#endif /* JERRY_DEBUGGER */
+#endif /* ENABLED (JERRY_DEBUGGER) */
     frame_ctx_p->byte_code_p = (uint8_t *) vm_error_byte_code_p;
   }
   else
   {
     frame_ctx_p->byte_code_p = byte_code_p;
-    ecma_free_value (*(--stack_top_p));
     uint32_t opcode_data = vm_decode_table[(CBC_END + 1) + opcode];
 
     if (!(opcode_data & (VM_OC_PUT_STACK | VM_OC_PUT_BLOCK)))
@@ -514,7 +601,7 @@ vm_super_call (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
     }
     else if (opcode_data & VM_OC_PUT_STACK)
     {
-      *stack_top_p++ = completion_value;
+      *frame_ctx_p->stack_top_p++ = completion_value;
     }
     else
     {
@@ -522,10 +609,103 @@ vm_super_call (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
       frame_ctx_p->block_result = completion_value;
     }
   }
-
-  frame_ctx_p->stack_top_p = stack_top_p;
 } /* vm_super_call */
-#endif /* ENABLED (JERRY_ES2015_CLASS) */
+
+/**
+ * Perform one of the following call/construct operation with spreaded argument list
+ *   - f(...args)
+ *   - o.f(...args)
+ *   - new O(...args)
+ */
+static void
+vm_spread_operation (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
+{
+  JERRY_ASSERT (frame_ctx_p->byte_code_p[0] == CBC_EXT_OPCODE);
+
+  uint8_t opcode = frame_ctx_p->byte_code_p[1];
+  ecma_value_t completion_value;
+  ecma_value_t collection = *(--frame_ctx_p->stack_top_p);
+
+  ecma_collection_t *collection_p = ECMA_GET_INTERNAL_VALUE_POINTER (ecma_collection_t, collection);
+  ecma_value_t func_value = *(--frame_ctx_p->stack_top_p);
+  bool is_call_prop = opcode >= CBC_EXT_SPREAD_CALL_PROP;
+
+  if (frame_ctx_p->byte_code_p[1] == CBC_EXT_SPREAD_NEW)
+  {
+    if (!ecma_is_value_object (func_value)
+        || !ecma_object_is_constructor (ecma_get_object_from_value (func_value)))
+    {
+      completion_value = ecma_raise_type_error (ECMA_ERR_MSG ("Expected a constructor."));
+    }
+    else
+    {
+      ecma_object_t *constructor_obj_p = ecma_get_object_from_value (func_value);
+
+      completion_value = ecma_op_function_construct (constructor_obj_p,
+                                                     ECMA_VALUE_UNDEFINED,
+                                                     collection_p->buffer_p,
+                                                     collection_p->item_count);
+    }
+  }
+  else
+  {
+    ecma_value_t this_value = is_call_prop ? frame_ctx_p->stack_top_p[-2] : ECMA_VALUE_UNDEFINED;
+
+    if (!ecma_is_value_object (func_value)
+        || !ecma_op_object_is_callable (ecma_get_object_from_value (func_value)))
+    {
+      completion_value = ecma_raise_type_error (ECMA_ERR_MSG ("Expected a function."));
+    }
+    else
+    {
+      ecma_object_t *func_obj_p = ecma_get_object_from_value (func_value);
+
+      completion_value = ecma_op_function_call (func_obj_p,
+                                                this_value,
+                                                collection_p->buffer_p,
+                                                collection_p->item_count);
+    }
+
+    if (is_call_prop)
+    {
+      ecma_free_value (*(--frame_ctx_p->stack_top_p));
+      ecma_free_value (*(--frame_ctx_p->stack_top_p));
+    }
+  }
+
+  ecma_collection_free (collection_p);
+  ecma_free_value (func_value);
+
+  if (JERRY_UNLIKELY (ECMA_IS_VALUE_ERROR (completion_value)))
+  {
+#if ENABLED (JERRY_DEBUGGER)
+    JERRY_CONTEXT (debugger_exception_byte_code_p) = frame_ctx_p->byte_code_p;
+#endif /* ENABLED (JERRY_DEBUGGER) */
+    frame_ctx_p->byte_code_p = (uint8_t *) vm_error_byte_code_p;
+  }
+  else
+  {
+    uint32_t opcode_data = vm_decode_table[(CBC_END + 1) + opcode];
+
+    if (!(opcode_data & (VM_OC_PUT_STACK | VM_OC_PUT_BLOCK)))
+    {
+      ecma_fast_free_value (completion_value);
+    }
+    else if (opcode_data & VM_OC_PUT_STACK)
+    {
+      *frame_ctx_p->stack_top_p++ = completion_value;
+    }
+    else
+    {
+      ecma_fast_free_value (frame_ctx_p->block_result);
+      frame_ctx_p->block_result = completion_value;
+    }
+
+    /* EXT_OPCODE, SPREAD_OPCODE, BYTE_ARG */
+    frame_ctx_p->byte_code_p += 3;
+  }
+} /* vm_spread_operation */
+#endif /* ENABLED (JERRY_ES2015) */
 
 /**
  * 'Function call' opcode handler.
@@ -535,7 +715,7 @@ vm_super_call (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
 static void
 opfunc_call (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
 {
-  uint8_t *byte_code_p = frame_ctx_p->byte_code_p + 1;
+  const uint8_t *byte_code_p = frame_ctx_p->byte_code_p + 1;
   uint8_t opcode = byte_code_p[-1];
   uint32_t arguments_list_len;
 
@@ -555,7 +735,8 @@ opfunc_call (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
   ecma_value_t func_value = stack_top_p[-1];
   ecma_value_t completion_value;
 
-  if (!ecma_op_is_callable (func_value))
+  if (!ecma_is_value_object (func_value)
+      || !ecma_op_object_is_callable (ecma_get_object_from_value (func_value)))
   {
     completion_value = ecma_raise_type_error (ECMA_ERR_MSG ("Expected a function."));
   }
@@ -585,9 +766,9 @@ opfunc_call (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
 
   if (JERRY_UNLIKELY (ECMA_IS_VALUE_ERROR (completion_value)))
   {
-#ifdef JERRY_DEBUGGER
+#if ENABLED (JERRY_DEBUGGER)
     JERRY_CONTEXT (debugger_exception_byte_code_p) = frame_ctx_p->byte_code_p;
-#endif /* JERRY_DEBUGGER */
+#endif /* ENABLED (JERRY_DEBUGGER) */
     frame_ctx_p->byte_code_p = (uint8_t *) vm_error_byte_code_p;
   }
   else
@@ -622,7 +803,7 @@ opfunc_call (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
 static void
 opfunc_construct (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
 {
-  uint8_t *byte_code_p = frame_ctx_p->byte_code_p + 1;
+  const uint8_t *byte_code_p = frame_ctx_p->byte_code_p + 1;
   uint8_t opcode = byte_code_p[-1];
   unsigned int arguments_list_len;
 
@@ -639,7 +820,8 @@ opfunc_construct (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
   ecma_value_t constructor_value = stack_top_p[-1];
   ecma_value_t completion_value;
 
-  if (!ecma_is_constructor (constructor_value))
+  if (!ecma_is_value_object (constructor_value)
+      || !ecma_object_is_constructor (ecma_get_object_from_value (constructor_value)))
   {
     completion_value = ecma_raise_type_error (ECMA_ERR_MSG ("Expected a constructor."));
   }
@@ -661,9 +843,9 @@ opfunc_construct (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
 
   if (JERRY_UNLIKELY (ECMA_IS_VALUE_ERROR (completion_value)))
   {
-#ifdef JERRY_DEBUGGER
+#if ENABLED (JERRY_DEBUGGER)
     JERRY_CONTEXT (debugger_exception_byte_code_p) = frame_ctx_p->byte_code_p;
-#endif /* JERRY_DEBUGGER */
+#endif /* ENABLED (JERRY_DEBUGGER) */
     frame_ctx_p->byte_code_p = (uint8_t *) vm_error_byte_code_p;
   }
   else
@@ -710,7 +892,7 @@ opfunc_construct (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
       if ((literal_index) < register_end) \
       { \
         /* Note: There should be no specialization for arguments. */ \
-        (target_value) = ecma_fast_copy_value (frame_ctx_p->registers_p[literal_index]); \
+        (target_value) = ecma_fast_copy_value (VM_GET_REGISTER (frame_ctx_p, literal_index)); \
       } \
       else \
       { \
@@ -740,155 +922,6 @@ opfunc_construct (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
   while (0)
 
 /**
- * Run initializer byte codes.
- *
- * @return ecma value
- */
-static void
-vm_init_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
-{
-  const ecma_compiled_code_t *bytecode_header_p = frame_ctx_p->bytecode_header_p;
-  uint8_t *byte_code_p = frame_ctx_p->byte_code_p;
-  uint16_t encoding_limit;
-  uint16_t encoding_delta;
-  uint16_t register_end;
-  ecma_value_t *literal_start_p = frame_ctx_p->literal_start_p;
-  bool is_strict = ((frame_ctx_p->bytecode_header_p->status_flags & CBC_CODE_FLAGS_STRICT_MODE) != 0);
-
-  /* Prepare. */
-  if (!(bytecode_header_p->status_flags & CBC_CODE_FLAGS_FULL_LITERAL_ENCODING))
-  {
-    encoding_limit = 255;
-    encoding_delta = 0xfe01;
-  }
-  else
-  {
-    encoding_limit = 128;
-    encoding_delta = 0x8000;
-  }
-
-  if (frame_ctx_p->bytecode_header_p->status_flags & CBC_CODE_FLAGS_UINT16_ARGUMENTS)
-  {
-    cbc_uint16_arguments_t *args_p = (cbc_uint16_arguments_t *) (frame_ctx_p->bytecode_header_p);
-    register_end = args_p->register_end;
-  }
-  else
-  {
-    cbc_uint8_arguments_t *args_p = (cbc_uint8_arguments_t *) (frame_ctx_p->bytecode_header_p);
-    register_end = args_p->register_end;
-  }
-
-  while (true)
-  {
-    switch (*byte_code_p)
-    {
-      case CBC_DEFINE_VARS:
-      {
-        uint32_t literal_index_end;
-        uint32_t literal_index = register_end;
-
-        byte_code_p++;
-        READ_LITERAL_INDEX (literal_index_end);
-
-        while (literal_index <= literal_index_end)
-        {
-          ecma_string_t *name_p = ecma_get_string_from_value (literal_start_p[literal_index]);
-          vm_var_decl (frame_ctx_p, name_p);
-          literal_index++;
-        }
-        break;
-      }
-
-      case CBC_INITIALIZE_VAR:
-      case CBC_INITIALIZE_VARS:
-      {
-        uint8_t type = *byte_code_p;
-        uint32_t literal_index;
-        uint32_t literal_index_end;
-
-        byte_code_p++;
-        READ_LITERAL_INDEX (literal_index);
-
-        if (type == CBC_INITIALIZE_VAR)
-        {
-          literal_index_end = literal_index;
-        }
-        else
-        {
-          READ_LITERAL_INDEX (literal_index_end);
-        }
-
-        while (literal_index <= literal_index_end)
-        {
-          uint32_t value_index;
-          ecma_value_t lit_value;
-
-          READ_LITERAL_INDEX (value_index);
-
-          if (value_index < register_end)
-          {
-            lit_value = frame_ctx_p->registers_p[value_index];
-          }
-          else
-          {
-            lit_value = vm_construct_literal_object (frame_ctx_p,
-                                                     literal_start_p[value_index]);
-          }
-
-          if (literal_index < register_end)
-          {
-            frame_ctx_p->registers_p[literal_index] = lit_value;
-          }
-          else
-          {
-            ecma_string_t *name_p = ecma_get_string_from_value (literal_start_p[literal_index]);
-
-            vm_var_decl (frame_ctx_p, name_p);
-
-            ecma_value_t put_value_result = ecma_op_put_value_lex_env_base (frame_ctx_p->lex_env_p,
-                                                                            name_p,
-                                                                            is_strict,
-                                                                            lit_value);
-
-            JERRY_ASSERT (ecma_is_value_boolean (put_value_result)
-                          || ecma_is_value_empty (put_value_result)
-                          || ECMA_IS_VALUE_ERROR (put_value_result));
-
-            if (ECMA_IS_VALUE_ERROR (put_value_result))
-            {
-              ecma_free_value (JERRY_CONTEXT (error_value));
-            }
-
-            if (value_index >= register_end)
-            {
-              ecma_free_value (lit_value);
-            }
-          }
-
-          literal_index++;
-        }
-        break;
-      }
-
-#ifdef JERRY_ENABLE_SNAPSHOT_EXEC
-      case CBC_SET_BYTECODE_PTR:
-      {
-        memcpy (&byte_code_p, byte_code_p + 1, sizeof (uint8_t *));
-        frame_ctx_p->byte_code_start_p = byte_code_p;
-        break;
-      }
-#endif /* JERRY_ENABLE_SNAPSHOT_EXEC */
-
-      default:
-      {
-        frame_ctx_p->byte_code_p = byte_code_p;
-        return;
-      }
-    }
-  }
-} /* vm_init_loop */
-
-/**
  * Run generic byte code.
  *
  * @return ecma value
@@ -897,7 +930,7 @@ static ecma_value_t JERRY_ATTR_NOINLINE
 vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
 {
   const ecma_compiled_code_t *bytecode_header_p = frame_ctx_p->bytecode_header_p;
-  uint8_t *byte_code_p = frame_ctx_p->byte_code_p;
+  const uint8_t *byte_code_p = frame_ctx_p->byte_code_p;
   ecma_value_t *literal_start_p = frame_ctx_p->literal_start_p;
 
   ecma_value_t *stack_top_p;
@@ -916,13 +949,13 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
   /* Prepare for byte code execution. */
   if (!(bytecode_header_p->status_flags & CBC_CODE_FLAGS_FULL_LITERAL_ENCODING))
   {
-    encoding_limit = 255;
-    encoding_delta = 0xfe01;
+    encoding_limit = CBC_SMALL_LITERAL_ENCODING_LIMIT;
+    encoding_delta = CBC_SMALL_LITERAL_ENCODING_DELTA;
   }
   else
   {
-    encoding_limit = 128;
-    encoding_delta = 0x8000;
+    encoding_limit = CBC_FULL_LITERAL_ENCODING_LIMIT;
+    encoding_delta = CBC_FULL_LITERAL_ENCODING_DELTA;
   }
 
   if (bytecode_header_p->status_flags & CBC_CODE_FLAGS_UINT16_ARGUMENTS)
@@ -948,7 +981,7 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
     /* Internal loop for byte code execution. */
     while (true)
     {
-      uint8_t *byte_code_start_p = byte_code_p;
+      const uint8_t *byte_code_start_p = byte_code_p;
       uint8_t opcode = *byte_code_p++;
       uint32_t opcode_data = opcode;
 
@@ -984,7 +1017,7 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
             }
             case VM_OC_GET_STACK_LITERAL:
             {
-              JERRY_ASSERT (stack_top_p > frame_ctx_p->registers_p + register_end);
+              JERRY_ASSERT (stack_top_p > VM_GET_REGISTERS (frame_ctx_p) + register_end);
               right_value = left_value;
               left_value = *(--stack_top_p);
               break;
@@ -1005,12 +1038,12 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
         JERRY_ASSERT (operands == VM_OC_GET_STACK
                       || operands == VM_OC_GET_STACK_STACK);
 
-        JERRY_ASSERT (stack_top_p > frame_ctx_p->registers_p + register_end);
+        JERRY_ASSERT (stack_top_p > VM_GET_REGISTERS (frame_ctx_p) + register_end);
         left_value = *(--stack_top_p);
 
         if (operands == VM_OC_GET_STACK_STACK)
         {
-          JERRY_ASSERT (stack_top_p > frame_ctx_p->registers_p + register_end);
+          JERRY_ASSERT (stack_top_p > VM_GET_REGISTERS (frame_ctx_p) + register_end);
           right_value = left_value;
           left_value = *(--stack_top_p);
         }
@@ -1036,7 +1069,7 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
 
         if (opcode_data & VM_OC_BACKWARD_BRANCH)
         {
-#ifdef JERRY_VM_EXEC_STOP
+#if ENABLED (JERRY_VM_EXEC_STOP)
           if (JERRY_CONTEXT (vm_exec_stop_cb) != NULL
               && --JERRY_CONTEXT (vm_exec_stop_counter) == 0)
           {
@@ -1050,21 +1083,22 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
             {
               JERRY_CONTEXT (vm_exec_stop_counter) = 1;
 
-              if (!ecma_is_value_error_reference (result))
+              if (ecma_is_value_error_reference (result))
               {
-                JERRY_CONTEXT (error_value) = result;
+                ecma_raise_error_from_error_reference (result);
               }
               else
               {
-                JERRY_CONTEXT (error_value) = ecma_clear_error_reference (result, false);
+                jcontext_raise_exception (result);
               }
 
-              JERRY_CONTEXT (status_flags) &= (uint32_t) ~ECMA_STATUS_EXCEPTION;
+              JERRY_ASSERT (jcontext_has_pending_exception ());
+              jcontext_set_abort_flag (true);
               result = ECMA_VALUE_ERROR;
               goto error;
             }
           }
-#endif /* JERRY_VM_EXEC_STOP */
+#endif /* ENABLED (JERRY_VM_EXEC_STOP) */
 
           branch_offset = -branch_offset;
         }
@@ -1074,7 +1108,7 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
       {
         case VM_OC_POP:
         {
-          JERRY_ASSERT (stack_top_p > frame_ctx_p->registers_p + register_end);
+          JERRY_ASSERT (stack_top_p > VM_GET_REGISTERS (frame_ctx_p) + register_end);
           ecma_free_value (*(--stack_top_p));
           continue;
         }
@@ -1191,21 +1225,310 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
 
           ecma_extended_object_t *ext_func_p = (ecma_extended_object_t *) func_p;
 
-          JERRY_ASSERT (frame_ctx_p->lex_env_p == ECMA_GET_INTERNAL_VALUE_POINTER (ecma_object_t,
-                                                                                   ext_func_p->u.function.scope_cp));
+          JERRY_ASSERT (frame_ctx_p->lex_env_p ==
+                        ECMA_GET_NON_NULL_POINTER_FROM_POINTER_TAG (ecma_object_t, ext_func_p->u.function.scope_cp));
 
           ecma_object_t *name_lex_env = ecma_create_decl_lex_env (frame_ctx_p->lex_env_p);
 
           ecma_op_create_immutable_binding (name_lex_env, ecma_get_string_from_value (right_value), left_value);
 
-          ECMA_SET_INTERNAL_VALUE_POINTER (ext_func_p->u.function.scope_cp, name_lex_env);
+          ECMA_SET_NON_NULL_POINTER_TAG (ext_func_p->u.function.scope_cp, name_lex_env, 0);
 
           ecma_free_value (right_value);
           ecma_deref_object (name_lex_env);
           *stack_top_p++ = left_value;
           continue;
         }
-#if ENABLED (JERRY_ES2015_OBJECT_INITIALIZER)
+        case VM_OC_CREATE_BINDING:
+        {
+#if !ENABLED (JERRY_ES2015)
+          JERRY_ASSERT (opcode == CBC_CREATE_VAR);
+#endif /* !ENABLED (JERRY_ES2015) */
+
+          uint32_t literal_index;
+
+          READ_LITERAL_INDEX (literal_index);
+
+          ecma_string_t *name_p = ecma_get_string_from_value (literal_start_p[literal_index]);
+
+          JERRY_ASSERT (ecma_get_lex_env_type (frame_ctx_p->lex_env_p) == ECMA_LEXICAL_ENVIRONMENT_DECLARATIVE);
+          JERRY_ASSERT (ecma_find_named_property (frame_ctx_p->lex_env_p, name_p) == NULL);
+
+          uint8_t prop_attributes = ECMA_PROPERTY_FLAG_WRITABLE;
+
+#if ENABLED (JERRY_ES2015)
+          if (opcode == CBC_CREATE_LET)
+          {
+            prop_attributes = ECMA_PROPERTY_ENUMERABLE_WRITABLE;
+          }
+          else if (opcode == CBC_CREATE_CONST)
+          {
+            prop_attributes = ECMA_PROPERTY_FLAG_ENUMERABLE;
+          }
+
+          ecma_property_value_t *property_value_p;
+          property_value_p = ecma_create_named_data_property (frame_ctx_p->lex_env_p, name_p, prop_attributes, NULL);
+
+          if (opcode != CBC_CREATE_VAR)
+          {
+            property_value_p->value = ECMA_VALUE_UNINITIALIZED;
+          }
+#else /* !ENABLED (JERRY_ES2015) */
+          ecma_create_named_data_property (frame_ctx_p->lex_env_p, name_p, prop_attributes, NULL);
+#endif /* ENABLED (JERRY_ES2015) */
+
+          continue;
+        }
+        case VM_OC_VAR_EVAL:
+        {
+          uint32_t literal_index;
+          ecma_value_t lit_value = ECMA_VALUE_UNDEFINED;
+
+          if (opcode == CBC_CREATE_VAR_FUNC_EVAL)
+          {
+            uint32_t value_index;
+            READ_LITERAL_INDEX (value_index);
+
+            lit_value = vm_construct_literal_object (frame_ctx_p,
+                                                     literal_start_p[value_index]);
+          }
+
+          READ_LITERAL_INDEX (literal_index);
+
+          ecma_string_t *name_p = ecma_get_string_from_value (literal_start_p[literal_index]);
+          ecma_object_t *lex_env_p = frame_ctx_p->lex_env_p;
+
+          while (lex_env_p->type_flags_refs & ECMA_OBJECT_FLAG_BLOCK)
+          {
+  #if ENABLED (JERRY_ES2015) && !(defined JERRY_NDEBUG)
+            if (ecma_get_lex_env_type (lex_env_p) == ECMA_LEXICAL_ENVIRONMENT_DECLARATIVE)
+            {
+              ecma_property_t *property_p = ecma_find_named_property (lex_env_p, name_p);
+
+              JERRY_ASSERT (property_p == NULL || !(*property_p & ECMA_PROPERTY_FLAG_ENUMERABLE));
+            }
+  #endif /* ENABLED (JERRY_ES2015) && !JERRY_NDEBUG */
+
+            JERRY_ASSERT (lex_env_p->u2.outer_reference_cp != JMEM_CP_NULL);
+            lex_env_p = ECMA_GET_NON_NULL_POINTER (ecma_object_t, lex_env_p->u2.outer_reference_cp);
+          }
+
+  #if ENABLED (JERRY_ES2015) && !(defined JERRY_NDEBUG)
+          if (ecma_get_lex_env_type (lex_env_p) == ECMA_LEXICAL_ENVIRONMENT_DECLARATIVE)
+          {
+            ecma_property_t *property_p = ecma_find_named_property (lex_env_p, name_p);
+
+            JERRY_ASSERT (property_p == NULL || !(*property_p & ECMA_PROPERTY_FLAG_ENUMERABLE));
+          }
+  #endif /* ENABLED (JERRY_ES2015) && !JERRY_NDEBUG */
+
+          result = vm_var_decl (lex_env_p, name_p, frame_ctx_p->is_eval_code);
+
+          if (ECMA_IS_VALUE_ERROR (result))
+          {
+            goto error;
+          }
+
+          if (lit_value != ECMA_VALUE_UNDEFINED)
+          {
+            result = vm_set_var (lex_env_p, name_p, is_strict, lit_value);
+
+            if (ECMA_IS_VALUE_ERROR (result))
+            {
+              goto error;
+            }
+          }
+
+          continue;
+        }
+        case VM_OC_INIT_LOCAL:
+        {
+          uint32_t literal_index, value_index;
+          ecma_value_t lit_value;
+
+          READ_LITERAL_INDEX (value_index);
+          READ_LITERAL_INDEX (literal_index);
+
+          JERRY_ASSERT (value_index != literal_index);
+          JERRY_ASSERT (value_index >= register_end || literal_index >= register_end);
+
+          if (value_index < register_end)
+          {
+            /* Take (not copy) the reference. */
+            lit_value = ecma_copy_value_if_not_object (VM_GET_REGISTER (frame_ctx_p, value_index));
+          }
+          else
+          {
+            lit_value = vm_construct_literal_object (frame_ctx_p,
+                                                     literal_start_p[value_index]);
+          }
+
+          if (literal_index < register_end)
+          {
+            ecma_fast_free_value (VM_GET_REGISTER (frame_ctx_p, literal_index));
+            VM_GET_REGISTER (frame_ctx_p, literal_index) = lit_value;
+            continue;
+          }
+
+          ecma_string_t *name_p = ecma_get_string_from_value (literal_start_p[literal_index]);
+
+          JERRY_ASSERT (ecma_get_lex_env_type (frame_ctx_p->lex_env_p) == ECMA_LEXICAL_ENVIRONMENT_DECLARATIVE);
+          JERRY_ASSERT (ecma_find_named_property (frame_ctx_p->lex_env_p, name_p) == NULL);
+
+          ecma_property_value_t *property_value_p;
+          property_value_p = ecma_create_named_data_property (frame_ctx_p->lex_env_p,
+                                                              name_p,
+                                                              ECMA_PROPERTY_FLAG_WRITABLE,
+                                                              NULL);
+
+          JERRY_ASSERT (property_value_p->value == ECMA_VALUE_UNDEFINED);
+          property_value_p->value = lit_value;
+
+          if (value_index >= register_end)
+          {
+            ecma_free_value (lit_value);
+          }
+
+          continue;
+        }
+#if ENABLED (JERRY_ES2015)
+        case VM_OC_CHECK_VAR:
+        {
+          JERRY_ASSERT (ecma_get_global_scope () == frame_ctx_p->lex_env_p);
+
+          uint32_t literal_index;
+          READ_LITERAL_INDEX (literal_index);
+
+          if ((frame_ctx_p->lex_env_p->type_flags_refs & ECMA_OBJECT_FLAG_BLOCK) == 0)
+          {
+            continue;
+          }
+
+          ecma_string_t *const literal_name_p = ecma_get_string_from_value (literal_start_p[literal_index]);
+          ecma_property_t *const binding_p = ecma_find_named_property (frame_ctx_p->lex_env_p, literal_name_p);
+
+          if (binding_p != NULL)
+          {
+            result = ecma_raise_syntax_error (ECMA_ERR_MSG ("Local variable is redeclared."));
+            goto error;
+          }
+
+          continue;
+        }
+        case VM_OC_CHECK_LET:
+        {
+          JERRY_ASSERT (ecma_get_global_scope () == frame_ctx_p->lex_env_p);
+
+          uint32_t literal_index;
+          READ_LITERAL_INDEX (literal_index);
+
+          ecma_string_t *literal_name_p = ecma_get_string_from_value (literal_start_p[literal_index]);
+          ecma_object_t *lex_env_p = frame_ctx_p->lex_env_p;
+          ecma_property_t *binding_p = NULL;
+
+          if (lex_env_p->type_flags_refs & ECMA_OBJECT_FLAG_BLOCK)
+          {
+            binding_p = ecma_find_named_property (lex_env_p, literal_name_p);
+
+            JERRY_ASSERT (lex_env_p->u2.outer_reference_cp != JMEM_CP_NULL);
+            lex_env_p = ECMA_GET_NON_NULL_POINTER (ecma_object_t, lex_env_p->u2.outer_reference_cp);
+          }
+
+          if (binding_p != NULL)
+          {
+            result = ecma_raise_syntax_error (ECMA_ERR_MSG ("Local variable is redeclared."));
+            goto error;
+          }
+
+          result = ecma_op_has_binding (lex_env_p, literal_name_p);
+
+#if ENABLED (JERRY_ES2015_BUILTIN_PROXY)
+          if (ECMA_IS_VALUE_ERROR (result))
+          {
+            goto error;
+          }
+#endif /* ENABLED (JERRY_ES2015_BUILTIN_PROXY) */
+
+          if (ecma_is_value_true (result))
+          {
+            result = ecma_raise_syntax_error (ECMA_ERR_MSG ("Local variable is redeclared."));
+            goto error;
+          }
+
+          continue;
+        }
+        case VM_OC_ASSIGN_LET_CONST:
+        {
+          uint32_t literal_index;
+          READ_LITERAL_INDEX (literal_index);
+
+          JERRY_ASSERT (literal_index >= register_end);
+          JERRY_ASSERT (ecma_get_lex_env_type (frame_ctx_p->lex_env_p) == ECMA_LEXICAL_ENVIRONMENT_DECLARATIVE);
+
+          ecma_string_t *name_p = ecma_get_string_from_value (literal_start_p[literal_index]);
+          ecma_property_t *property_p = ecma_find_named_property (frame_ctx_p->lex_env_p, name_p);
+
+          JERRY_ASSERT (property_p != NULL
+                        && ECMA_PROPERTY_GET_TYPE (*property_p) == ECMA_PROPERTY_TYPE_NAMEDDATA);
+          JERRY_ASSERT (ECMA_PROPERTY_VALUE_PTR (property_p)->value == ECMA_VALUE_UNINITIALIZED);
+
+          ECMA_PROPERTY_VALUE_PTR (property_p)->value = left_value;
+
+          if (ecma_is_value_object (left_value))
+          {
+            ecma_deref_object (ecma_get_object_from_value (left_value));
+          }
+          continue;
+        }
+        case VM_OC_COPY_TO_GLOBAL:
+        {
+          uint32_t literal_index;
+          READ_LITERAL_INDEX (literal_index);
+
+          ecma_string_t *name_p = ecma_get_string_from_value (literal_start_p[literal_index]);
+          ecma_object_t *lex_env_p = frame_ctx_p->lex_env_p;
+
+          while (lex_env_p->type_flags_refs & ECMA_OBJECT_FLAG_BLOCK)
+          {
+#if ENABLED (JERRY_ES2015) && !(defined JERRY_NDEBUG)
+            if (ecma_get_lex_env_type (lex_env_p) == ECMA_LEXICAL_ENVIRONMENT_DECLARATIVE)
+            {
+              ecma_property_t *property_p = ecma_find_named_property (lex_env_p, name_p);
+
+              JERRY_ASSERT (property_p == NULL || !(*property_p & ECMA_PROPERTY_FLAG_ENUMERABLE));
+            }
+#endif /* ENABLED (JERRY_ES2015) && !JERRY_NDEBUG */
+
+            JERRY_ASSERT (lex_env_p->u2.outer_reference_cp != JMEM_CP_NULL);
+            lex_env_p = ECMA_GET_NON_NULL_POINTER (ecma_object_t, lex_env_p->u2.outer_reference_cp);
+          }
+
+#if ENABLED (JERRY_ES2015) && !(defined JERRY_NDEBUG)
+          if (ecma_get_lex_env_type (lex_env_p) == ECMA_LEXICAL_ENVIRONMENT_DECLARATIVE)
+          {
+            ecma_property_t *property_p = ecma_find_named_property (lex_env_p, name_p);
+
+            JERRY_ASSERT (property_p == NULL || !(*property_p & ECMA_PROPERTY_FLAG_ENUMERABLE));
+          }
+#endif /* ENABLED (JERRY_ES2015) && !JERRY_NDEBUG */
+
+          result = vm_set_var (lex_env_p, name_p, is_strict, left_value);
+
+          if (ECMA_IS_VALUE_ERROR (result))
+          {
+            goto error;
+          }
+
+          continue;
+        }
+        case VM_OC_CLONE_CONTEXT:
+        {
+          JERRY_ASSERT (byte_code_start_p[0] == CBC_EXT_OPCODE);
+
+          bool copy_values = (byte_code_start_p[1] == CBC_EXT_CLONE_FULL_CONTEXT);
+          frame_ctx_p->lex_env_p = ecma_clone_decl_lexical_environment (frame_ctx_p->lex_env_p, copy_values);
+          continue;
+        }
         case VM_OC_SET_COMPUTED_PROPERTY:
         {
           /* Swap values. */
@@ -1214,7 +1537,15 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
           left_value ^= right_value;
           /* FALLTHRU */
         }
-#endif /* ENABLED (JERRY_ES2015_OBJECT_INITIALIZER) */
+#endif /* ENABLED (JERRY_ES2015) */
+#if ENABLED (JERRY_SNAPSHOT_EXEC)
+        case VM_OC_SET_BYTECODE_PTR:
+        {
+          memcpy (&byte_code_p, byte_code_p++, sizeof (uint8_t *));
+          frame_ctx_p->byte_code_start_p = byte_code_p;
+          continue;
+        }
+#endif /* ENABLED (JERRY_SNAPSHOT_EXEC) */
         case VM_OC_SET_PROPERTY:
         {
           JERRY_STATIC_ASSERT (VM_OC_NON_STATIC_FLAG == VM_OC_BACKWARD_BRANCH,
@@ -1230,7 +1561,7 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
             goto error;
           }
 
-#if ENABLED (JERRY_ES2015_CLASS)
+#if ENABLED (JERRY_ES2015)
           if (JERRY_UNLIKELY (ecma_compare_ecma_string_to_magic_id (prop_name_p, LIT_MAGIC_STRING_PROTOTYPE))
               && !(opcode_data & VM_OC_NON_STATIC_FLAG))
           {
@@ -1239,11 +1570,14 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
           }
 
           const int index = (int) (opcode_data >> VM_OC_NON_STATIC_SHIFT) - 2;
-#else /* !ENABLED (JERRY_ES2015_CLASS) */
+#else /* !ENABLED (JERRY_ES2015) */
           const int index = -1;
-#endif /* ENABLED (JERRY_ES2015_CLASS) */
+#endif /* ENABLED (JERRY_ES2015) */
 
           ecma_object_t *object_p = ecma_get_object_from_value (stack_top_p[index]);
+
+          JERRY_ASSERT (!ecma_op_object_is_fast_array (object_p));
+
           ecma_property_t *property_p = ecma_find_named_property (object_p, prop_name_p);
 
           if (property_p != NULL
@@ -1286,7 +1620,7 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
             goto error;
           }
 
-#if ENABLED (JERRY_ES2015_CLASS)
+#if ENABLED (JERRY_ES2015)
           if (JERRY_UNLIKELY (ecma_compare_ecma_string_to_magic_id (prop_name_p, LIT_MAGIC_STRING_PROTOTYPE))
               && !(opcode_data & VM_OC_NON_STATIC_FLAG))
           {
@@ -1295,9 +1629,9 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
           }
 
           const int index = (int) (opcode_data >> VM_OC_NON_STATIC_SHIFT) - 2;
-#else /* !ENABLED (JERRY_ES2015_CLASS) */
+#else /* !ENABLED (JERRY_ES2015) */
           const int index = -1;
-#endif /* ENABLED (JERRY_ES2015_CLASS) */
+#endif /* ENABLED (JERRY_ES2015) */
 
           opfunc_set_accessor (VM_OC_GROUP_GET_INDEX (opcode_data) == VM_OC_SET_GETTER,
                                stack_top_p[index],
@@ -1310,19 +1644,34 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
         }
         case VM_OC_PUSH_ARRAY:
         {
-          result = ecma_op_create_array_object (NULL, 0, false);
-
-          if (ECMA_IS_VALUE_ERROR (result))
-          {
-            goto error;
-          }
-
-          *stack_top_p++ = result;
+          // Note: this operation cannot throw an exception
+          *stack_top_p++ = ecma_make_object_value (ecma_op_new_fast_array_object (0));
           continue;
         }
-#if ENABLED (JERRY_ES2015_CLASS)
+#if ENABLED (JERRY_ES2015)
         case VM_OC_SUPER_CALL:
         {
+          uint8_t arguments_list_len = *byte_code_p++;
+
+          if (opcode >= CBC_EXT_SPREAD_SUPER_CALL)
+          {
+            stack_top_p -= arguments_list_len;
+            ecma_collection_t *arguments_p = opfunc_spread_arguments (stack_top_p, arguments_list_len);
+
+            if (JERRY_UNLIKELY (arguments_p == NULL))
+            {
+              result = ECMA_VALUE_ERROR;
+              goto error;
+            }
+
+            stack_top_p++;
+            ECMA_SET_INTERNAL_VALUE_POINTER (stack_top_p[-1], arguments_p);
+          }
+          else
+          {
+            stack_top_p -= arguments_list_len;
+          }
+
           frame_ctx_p->call_operation = VM_EXEC_SUPER_CALL;
           frame_ctx_p->byte_code_p = byte_code_start_p;
           frame_ctx_p->stack_top_p = stack_top_p;
@@ -1349,7 +1698,7 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
             {
               if (ECMA_IS_VALUE_ERROR (result))
               {
-                ecma_free_value (JERRY_CONTEXT (error_value));
+                jcontext_release_exception ();
               }
 
               ecma_free_value (result);
@@ -1372,10 +1721,9 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
           VM_PLUS_EQUAL_U16 (frame_ctx_p->context_depth, PARSER_SUPER_CLASS_CONTEXT_STACK_ALLOCATION);
           stack_top_p += PARSER_SUPER_CLASS_CONTEXT_STACK_ALLOCATION;
 
-          stack_top_p[-1] = VM_CREATE_CONTEXT (VM_CONTEXT_SUPER_CLASS, branch_offset);
+          stack_top_p[-1] = VM_CREATE_CONTEXT_WITH_ENV (VM_CONTEXT_SUPER_CLASS, branch_offset);
 
           frame_ctx_p->lex_env_p = super_env_p;
-
           continue;
         }
         case VM_OC_CLASS_INHERITANCE:
@@ -1388,10 +1736,17 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
 
           ecma_object_t *super_class_p = ecma_get_lex_env_binding_object (frame_ctx_p->lex_env_p);
 
-          if (ecma_get_object_prototype (super_class_p))
+          if (super_class_p->u2.prototype_cp != JMEM_CP_NULL)
           {
             ecma_value_t super_prototype_value = ecma_op_object_get_by_magic_id (super_class_p,
                                                                                  LIT_MAGIC_STRING_PROTOTYPE);
+
+            if (ECMA_IS_VALUE_ERROR (super_prototype_value))
+            {
+              result = super_prototype_value;
+              goto error;
+            }
+
             if (ecma_get_object_type (super_class_p) == ECMA_OBJECT_TYPE_BOUND_FUNCTION
                 && !ecma_is_value_object (super_prototype_value))
             {
@@ -1404,8 +1759,8 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
             {
               ecma_object_t *super_prototype_class_p = ecma_get_object_from_value (super_prototype_value);
 
-              ECMA_SET_POINTER (child_prototype_class_p->prototype_or_outer_reference_cp, super_prototype_class_p);
-              ECMA_SET_POINTER (child_class_p->prototype_or_outer_reference_cp, super_class_p);
+              ECMA_SET_NON_NULL_POINTER (child_prototype_class_p->u2.prototype_cp, super_prototype_class_p);
+              ECMA_SET_NON_NULL_POINTER (child_class_p->u2.prototype_cp, super_class_p);
 
             }
             ecma_free_value (super_prototype_value);
@@ -1460,9 +1815,10 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
           ecma_bytecode_ref ((ecma_compiled_code_t *) bytecode_p);
           ECMA_SET_INTERNAL_VALUE_POINTER (current_ext_func_obj_p->u.function.bytecode_cp,
                                            bytecode_p);
-          ECMA_SET_INTERNAL_VALUE_POINTER (current_ext_func_obj_p->u.function.scope_cp,
-                                           ECMA_GET_INTERNAL_VALUE_POINTER (const ecma_object_t,
-                                                                            new_ext_func_obj_p->u.function.scope_cp));
+
+          ecma_object_t *scope_p = ECMA_GET_NON_NULL_POINTER_FROM_POINTER_TAG (ecma_object_t,
+                                                                               new_ext_func_obj_p->u.function.scope_cp);
+          ECMA_SET_NON_NULL_POINTER_TAG (current_ext_func_obj_p->u.function.scope_cp, scope_p, 0);
           ecma_deref_object (new_constructor_obj_p);
           continue;
         }
@@ -1567,7 +1923,53 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
         }
         case VM_OC_SUPER_PROP_REFERENCE:
         {
-          const int index = (byte_code_start_p[1] == CBC_EXT_SUPER_PROP_ASSIGN) ? -1 : -3;
+          /**
+           * In case of this VM_OC_SUPER_PROP_REFERENCE the previously pushed 'super' must be replaced
+           * with the current 'this' value to correctly access the properties.
+           */
+          int index = -1; /* -1 in case of CBC_EXT_SUPER_PROP_ASSIGN */
+
+          if (JERRY_LIKELY (byte_code_start_p[1] == CBC_EXT_SUPER_PROP_CALL))
+          {
+            cbc_opcode_t next_call_opcode = (cbc_opcode_t) byte_code_start_p[2];
+            /* The next opcode must be a call opcode */
+            JERRY_ASSERT ((next_call_opcode >= CBC_CALL && next_call_opcode <= CBC_CALL2_PROP_BLOCK)
+                          || (next_call_opcode == CBC_EXT_OPCODE
+                              && byte_code_start_p[3] >= CBC_EXT_SPREAD_CALL
+                              && byte_code_start_p[3] <= CBC_EXT_SPREAD_CALL_PROP_BLOCK));
+
+            int arguments_list_len;
+            if (next_call_opcode >= CBC_CALL0)
+            {
+              /* CBC_CALL{0,1,2}* have their arg count encoded, extract it from there */
+              arguments_list_len = (int) ((next_call_opcode - CBC_CALL0) / 6);
+            }
+            else
+            {
+              /**
+               * In this case the arguments are coded into the byte code stream as a byte argument
+               * following the call opcode.
+               */
+              arguments_list_len = (int) byte_code_start_p[next_call_opcode == CBC_EXT_OPCODE ? 4 : 3];
+            }
+            /* The old 'super' value is at least '-3' element away from the current position on the stack. */
+            index = -3 - arguments_list_len;
+          }
+          else
+          {
+            /**
+             * The bytecode order for super assignment should be one of this:
+             *  - CBC_EXT_PUSH_SUPER, CBC_EXT_SUPER_PROP_ASSIGN.
+             *  - CBC_EXT_PUSH_STATIC_SUPER, CBC_EXT_SUPER_PROP_ASSIGN.
+             *  - CBC_EXT_PUSH_CONSTRUCTOR_SUPER_PROP, CBC_EXT_SUPER_PROP_ASSIGN.
+             * That is one ext opcode back (-1).
+             */
+            JERRY_ASSERT (byte_code_start_p[-1] == CBC_EXT_PUSH_SUPER
+                          || byte_code_start_p[-1] == CBC_EXT_PUSH_STATIC_SUPER
+                          || byte_code_start_p[-1] == CBC_EXT_PUSH_CONSTRUCTOR_SUPER_PROP);
+          }
+
+          /* Replace the old 'super' value with the correct 'this' binding */
           ecma_free_value (stack_top_p[index]);
           stack_top_p[index] = ecma_copy_value (frame_ctx_p->this_binding);
           continue;
@@ -1597,7 +1999,249 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
 
           goto error;
         }
-#endif /* ENABLED (JERRY_ES2015_CLASS) */
+        case VM_OC_PUSH_SPREAD_ELEMENT:
+        {
+          *stack_top_p++ = ECMA_VALUE_SPREAD_ELEMENT;
+          continue;
+        }
+        case VM_OC_GET_ITERATOR:
+        {
+          result = ecma_op_get_iterator (stack_top_p[-1], ECMA_VALUE_EMPTY);
+
+          if (ECMA_IS_VALUE_ERROR (result))
+          {
+            goto error;
+          }
+
+          *stack_top_p++ = result;
+          continue;
+        }
+        case VM_OC_ITERATOR_STEP:
+        {
+          JERRY_ASSERT (opcode >= CBC_EXT_ITERATOR_STEP && opcode <= CBC_EXT_ITERATOR_STEP_3);
+          const uint8_t index = (uint8_t) (1 + (opcode - CBC_EXT_ITERATOR_STEP));
+          result = ecma_op_iterator_step (stack_top_p[-index]);
+
+          if (ECMA_IS_VALUE_ERROR (result))
+          {
+            goto error;
+          }
+
+          ecma_value_t value = ECMA_VALUE_UNDEFINED;
+
+          if (!ecma_is_value_false (result))
+          {
+            value = ecma_op_iterator_value (result);
+            ecma_free_value (result);
+
+            if (ECMA_IS_VALUE_ERROR (value))
+            {
+              result = value;
+              goto error;
+            }
+          }
+
+          *stack_top_p++ = value;
+          continue;
+        }
+        case VM_OC_ITERATOR_CLOSE:
+        {
+          result = ecma_op_iterator_close (left_value);
+
+          if (ECMA_IS_VALUE_ERROR (result))
+          {
+            goto error;
+          }
+
+          goto free_left_value;
+        }
+        case VM_OC_DEFAULT_INITIALIZER:
+        {
+          JERRY_ASSERT (stack_top_p > VM_GET_REGISTERS (frame_ctx_p) + register_end);
+
+          if (stack_top_p[-1] != ECMA_VALUE_UNDEFINED)
+          {
+            byte_code_p = byte_code_start_p + branch_offset;
+            continue;
+          }
+
+          stack_top_p--;
+          continue;
+        }
+        case VM_OC_REST_INITIALIZER:
+        {
+          JERRY_ASSERT (opcode >= CBC_EXT_REST_INITIALIZER && opcode <= CBC_EXT_REST_INITIALIZER_3);
+          const uint8_t iterator_index = (uint8_t) (1 + (opcode - CBC_EXT_REST_INITIALIZER));
+          ecma_object_t *array_p = ecma_op_new_fast_array_object (0);
+          ecma_value_t iterator = stack_top_p[-iterator_index];
+          uint32_t index = 0;
+
+          while (true)
+          {
+            result = ecma_op_iterator_step (iterator);
+
+            if (ECMA_IS_VALUE_ERROR (result))
+            {
+              ecma_deref_object (array_p);
+              goto error;
+            }
+
+            if (ecma_is_value_false (result))
+            {
+              break;
+            }
+
+            ecma_value_t value = ecma_op_iterator_value (result);
+            ecma_free_value (result);
+
+            if (ECMA_IS_VALUE_ERROR (value))
+            {
+              ecma_deref_object (array_p);
+              result = value;
+              goto error;
+            }
+
+            bool set_result = ecma_fast_array_set_property (array_p, index++, value);
+            JERRY_ASSERT (set_result);
+            ecma_free_value (value);
+          }
+
+          *stack_top_p++ = ecma_make_object_value (array_p);
+          continue;
+        }
+        case VM_OC_INITIALIZER_PUSH_PROP:
+        {
+          result = vm_op_get_value (stack_top_p[-1], left_value);
+
+          if (ECMA_IS_VALUE_ERROR (result))
+          {
+            goto error;
+          }
+
+          *stack_top_p++ = result;
+          goto free_left_value;
+        }
+        case VM_OC_SPREAD_ARGUMENTS:
+        {
+          uint8_t arguments_list_len = *byte_code_p++;
+          stack_top_p -= arguments_list_len;
+
+          ecma_collection_t *arguments_p = opfunc_spread_arguments (stack_top_p, arguments_list_len);
+
+          if (JERRY_UNLIKELY (arguments_p == NULL))
+          {
+            result = ECMA_VALUE_ERROR;
+            goto error;
+          }
+
+          stack_top_p++;
+          ECMA_SET_INTERNAL_VALUE_POINTER (stack_top_p[-1], arguments_p);
+
+          frame_ctx_p->call_operation = VM_EXEC_SPREAD_OP;
+          frame_ctx_p->byte_code_p = byte_code_start_p;
+          frame_ctx_p->stack_top_p = stack_top_p;
+          return ECMA_VALUE_UNDEFINED;
+        }
+        case VM_OC_CREATE_GENERATOR:
+        {
+          frame_ctx_p->call_operation = VM_EXEC_RETURN;
+          frame_ctx_p->byte_code_p = byte_code_p;
+          frame_ctx_p->stack_top_p = stack_top_p;
+          result = opfunc_create_executable_object (frame_ctx_p);
+
+          if (ECMA_IS_VALUE_ERROR (result))
+          {
+            goto error;
+          }
+
+          return result;
+        }
+        case VM_OC_YIELD:
+        {
+          frame_ctx_p->call_operation = VM_EXEC_RETURN;
+          frame_ctx_p->byte_code_p = byte_code_p;
+          frame_ctx_p->stack_top_p = stack_top_p;
+          return left_value;
+        }
+        case VM_OC_EXT_RETURN:
+        {
+          result = left_value;
+          left_value = ECMA_VALUE_UNDEFINED;
+
+          ecma_value_t *stack_bottom_p = VM_GET_REGISTERS (frame_ctx_p) + register_end + frame_ctx_p->context_depth;
+
+          while (stack_top_p > stack_bottom_p)
+          {
+            ecma_fast_free_value (*(--stack_top_p));
+          }
+
+          goto error;
+        }
+        case VM_OC_RETURN_PROMISE:
+        {
+          result = opfunc_return_promise (left_value);
+          left_value = ECMA_VALUE_UNDEFINED;
+          goto error;
+        }
+        case VM_OC_STRING_CONCAT:
+        {
+          ecma_string_t *left_str_p = ecma_op_to_string (left_value);
+
+          if (JERRY_UNLIKELY (left_str_p == NULL))
+          {
+            result = ECMA_VALUE_ERROR;
+            goto error;
+          }
+          ecma_string_t *right_str_p = ecma_op_to_string (right_value);
+
+          if (JERRY_UNLIKELY (right_str_p == NULL))
+          {
+            ecma_deref_ecma_string (left_str_p);
+            result = ECMA_VALUE_ERROR;
+            goto error;
+          }
+
+          ecma_string_t *result_str_p = ecma_concat_ecma_strings (left_str_p, right_str_p);
+          ecma_deref_ecma_string (right_str_p);
+
+          *stack_top_p++ = ecma_make_string_value (result_str_p);
+          goto free_both_values;
+        }
+        case VM_OC_GET_TEMPLATE_OBJECT:
+        {
+          uint8_t tagged_idx = *byte_code_p++;
+          ecma_collection_t *collection_p = ecma_compiled_code_get_tagged_template_collection (bytecode_header_p);
+          JERRY_ASSERT (tagged_idx < collection_p->item_count);
+
+          *stack_top_p++ = ecma_copy_value (collection_p->buffer_p[tagged_idx]);
+          continue;
+        }
+        case VM_OC_PUSH_NEW_TARGET:
+        {
+          ecma_object_t *new_target_object = JERRY_CONTEXT (current_new_target);
+          if (new_target_object == NULL)
+          {
+            *stack_top_p++ = ECMA_VALUE_UNDEFINED;
+          }
+          else
+          {
+            JERRY_ASSERT (new_target_object != JERRY_CONTEXT_INVALID_NEW_TARGET);
+            ecma_ref_object (new_target_object);
+            *stack_top_p++ = ecma_make_object_value (new_target_object);
+          }
+          continue;
+        }
+        case VM_OC_REQUIRE_OBJECT_COERCIBLE:
+        {
+          result = ecma_op_check_object_coercible (stack_top_p[-1]);
+
+          if (ECMA_IS_VALUE_ERROR (result))
+          {
+            goto error;
+          }
+          continue;
+        }
+#endif /* ENABLED (JERRY_ES2015) */
         case VM_OC_PUSH_ELISON:
         {
           *stack_top_p++ = ECMA_VALUE_ARRAY_HOLE;
@@ -1605,53 +2249,25 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
         }
         case VM_OC_APPEND_ARRAY:
         {
-          ecma_object_t *array_obj_p;
-          uint32_t length_num;
-          uint32_t values_length = *byte_code_p++;
-
+          uint16_t values_length = *byte_code_p++;
           stack_top_p -= values_length;
 
-          array_obj_p = ecma_get_object_from_value (stack_top_p[-1]);
-          ecma_extended_object_t *ext_array_obj_p = (ecma_extended_object_t *) array_obj_p;
-
-          length_num = ext_array_obj_p->u.array.length;
-
-          for (uint32_t i = 0; i < values_length; i++)
+#if ENABLED (JERRY_ES2015)
+          if (*byte_code_start_p == CBC_EXT_OPCODE)
           {
-            if (!ecma_is_value_array_hole (stack_top_p[i]))
-            {
-              ecma_string_t *index_str_p = ecma_new_ecma_string_from_uint32 (length_num);
-
-              ecma_property_value_t *prop_value_p;
-
-              prop_value_p = ecma_create_named_data_property (array_obj_p,
-                                                              index_str_p,
-                                                              ECMA_PROPERTY_CONFIGURABLE_ENUMERABLE_WRITABLE,
-                                                              NULL);
-
-              JERRY_ASSERT (ecma_is_value_undefined (prop_value_p->value));
-              prop_value_p->value = stack_top_p[i];
-
-              /* The reference is moved so no need to free stack_top_p[i] except for objects. */
-              if (ecma_is_value_object (stack_top_p[i]))
-              {
-                ecma_free_value (stack_top_p[i]);
-              }
-
-              ecma_deref_ecma_string (index_str_p);
-            }
-
-            length_num++;
+            values_length = (uint16_t) (values_length | OPFUNC_HAS_SPREAD_ELEMENT);
           }
+#endif /* ENABLED (JERRY_ES2015) */
+          result = opfunc_append_array (stack_top_p, values_length);
 
-          ext_array_obj_p->u.array.length = length_num;
-          continue;
-        }
-        case VM_OC_PUSH_UNDEFINED_BASE:
-        {
-          stack_top_p[0] = stack_top_p[-1];
-          stack_top_p[-1] = ECMA_VALUE_UNDEFINED;
-          stack_top_p++;
+#if ENABLED (JERRY_ES2015)
+          if (ECMA_IS_VALUE_ERROR (result))
+          {
+            goto error;
+          }
+#else /* !ENABLED (JERRY_ES2015) */
+          JERRY_ASSERT (ecma_is_value_empty (result));
+#endif /* ENABLED (JERRY_ES2015) */
           continue;
         }
         case VM_OC_IDENT_REFERENCE:
@@ -1665,8 +2281,8 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
           if (literal_index < register_end)
           {
             *stack_top_p++ = ECMA_VALUE_REGISTER_REF;
-            *stack_top_p++ = literal_index;
-            *stack_top_p++ = ecma_fast_copy_value (frame_ctx_p->registers_p[literal_index]);
+            *stack_top_p++ = ecma_make_integer_value (literal_index);
+            *stack_top_p++ = ecma_fast_copy_value (VM_GET_REGISTER (frame_ctx_p, literal_index));
           }
           else
           {
@@ -1901,6 +2517,19 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
           left_value = ECMA_VALUE_UNDEFINED;
           break;
         }
+        case VM_OC_MOV_IDENT:
+        {
+          uint32_t literal_index;
+
+          READ_LITERAL_INDEX (literal_index);
+
+          JERRY_ASSERT (literal_index < register_end);
+          JERRY_ASSERT (!(opcode_data & (VM_OC_PUT_STACK | VM_OC_PUT_BLOCK)));
+
+          ecma_fast_free_value (VM_GET_REGISTER (frame_ctx_p, literal_index));
+          VM_GET_REGISTER (frame_ctx_p, literal_index) = left_value;
+          continue;
+        }
         case VM_OC_ASSIGN_PROP:
         {
           result = stack_top_p[-1];
@@ -1916,7 +2545,7 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
           left_value = ECMA_VALUE_UNDEFINED;
           break;
         }
-        case VM_OC_RET:
+        case VM_OC_RETURN:
         {
           JERRY_ASSERT (opcode == CBC_RETURN
                         || opcode == CBC_RETURN_WITH_BLOCK
@@ -1934,8 +2563,7 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
         }
         case VM_OC_THROW:
         {
-          JERRY_CONTEXT (error_value) = left_value;
-          JERRY_CONTEXT (status_flags) |= ECMA_STATUS_EXCEPTION;
+          jcontext_raise_exception (left_value);
 
           result = ECMA_VALUE_ERROR;
           left_value = ECMA_VALUE_UNDEFINED;
@@ -1949,7 +2577,10 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
         case VM_OC_EVAL:
         {
           JERRY_CONTEXT (status_flags) |= ECMA_STATUS_DIRECT_EVAL;
-          JERRY_ASSERT (*byte_code_p >= CBC_CALL && *byte_code_p <= CBC_CALL2_PROP_BLOCK);
+          JERRY_ASSERT ((*byte_code_p >= CBC_CALL && *byte_code_p <= CBC_CALL2_PROP_BLOCK)
+                        || (*byte_code_p == CBC_EXT_OPCODE
+                            && byte_code_p[1] >= CBC_EXT_SPREAD_CALL
+                            && byte_code_p[1] <= CBC_EXT_SPREAD_CALL_PROP_BLOCK));
           continue;
         }
         case VM_OC_CALL:
@@ -1969,9 +2600,9 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
         case VM_OC_ERROR:
         {
           JERRY_ASSERT (frame_ctx_p->byte_code_p[1] == CBC_EXT_ERROR);
-#ifdef JERRY_DEBUGGER
+#if ENABLED (JERRY_DEBUGGER)
           frame_ctx_p->byte_code_p = JERRY_CONTEXT (debugger_exception_byte_code_p);
-#endif /* JERRY_DEBUGGER */
+#endif /* ENABLED (JERRY_DEBUGGER) */
 
           result = ECMA_VALUE_ERROR;
           goto error;
@@ -2042,7 +2673,7 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
         {
           ecma_value_t value = *(--stack_top_p);
 
-          JERRY_ASSERT (stack_top_p > frame_ctx_p->registers_p + register_end);
+          JERRY_ASSERT (stack_top_p > VM_GET_REGISTERS (frame_ctx_p) + register_end);
 
           if (ecma_op_strict_equality_compare (value, stack_top_p[-1]))
           {
@@ -2138,7 +2769,7 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
 
           if (literal_index < register_end)
           {
-            left_value = ecma_copy_value (frame_ctx_p->registers_p[literal_index]);
+            left_value = ecma_copy_value (VM_GET_REGISTER (frame_ctx_p, literal_index));
           }
           else
           {
@@ -2152,7 +2783,7 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
 
             if (ref_base_lex_env_p == NULL)
             {
-              ecma_free_value (JERRY_CONTEXT (error_value));
+              jcontext_release_exception ();
               result = ECMA_VALUE_UNDEFINED;
             }
             else if (ECMA_IS_VALUE_ERROR (result))
@@ -2255,7 +2886,7 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
             continue;
           }
 
-          result = do_number_arithmetic (NUMBER_ARITHMETIC_SUBSTRACTION,
+          result = do_number_arithmetic (NUMBER_ARITHMETIC_SUBTRACTION,
                                          left_value,
                                          right_value);
 
@@ -2572,7 +3203,7 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
           if (ecma_are_values_integer_numbers (left_value, right_value))
           {
             bool is_less = (ecma_integer_value_t) left_value < (ecma_integer_value_t) right_value;
-#ifndef JERRY_VM_EXEC_STOP
+#if !ENABLED (JERRY_VM_EXEC_STOP)
             /* This is a lookahead to the next opcode to improve performance.
              * If it is CBC_BRANCH_IF_TRUE_BACKWARD, execute it. */
             if (*byte_code_p <= CBC_BRANCH_IF_TRUE_BACKWARD_3 && *byte_code_p >= CBC_BRANCH_IF_TRUE_BACKWARD)
@@ -2606,7 +3237,7 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
 
               continue;
             }
-#endif /* !JERRY_VM_EXEC_STOP */
+#endif /* !ENABLED (JERRY_VM_EXEC_STOP) */
             *stack_top_p++ = ecma_make_boolean_value (is_less);
             continue;
           }
@@ -2744,6 +3375,55 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
           *stack_top_p++ = result;
           goto free_both_values;
         }
+        case VM_OC_BLOCK_CREATE_CONTEXT:
+        {
+#if ENABLED (JERRY_ES2015)
+          ecma_value_t *stack_context_top_p;
+          stack_context_top_p = VM_GET_REGISTERS (frame_ctx_p) + register_end + frame_ctx_p->context_depth;
+
+          JERRY_ASSERT (stack_context_top_p == stack_top_p || stack_context_top_p == stack_top_p - 1);
+
+          if (byte_code_start_p[0] != CBC_EXT_OPCODE)
+          {
+            branch_offset += (int32_t) (byte_code_start_p - frame_ctx_p->byte_code_start_p);
+
+            if (stack_context_top_p != stack_top_p)
+            {
+               /* Preserve the value of switch statement. */
+              stack_context_top_p[1] = stack_context_top_p[0];
+            }
+
+            stack_context_top_p[0] = VM_CREATE_CONTEXT_WITH_ENV (VM_CONTEXT_BLOCK, branch_offset);
+
+            VM_PLUS_EQUAL_U16 (frame_ctx_p->context_depth, PARSER_BLOCK_CONTEXT_STACK_ALLOCATION);
+            stack_top_p += PARSER_BLOCK_CONTEXT_STACK_ALLOCATION;
+          }
+          else
+          {
+            JERRY_ASSERT (byte_code_start_p[1] == CBC_EXT_TRY_CREATE_ENV);
+
+            JERRY_ASSERT (VM_GET_CONTEXT_TYPE (stack_context_top_p[-1]) == VM_CONTEXT_TRY
+                          || VM_GET_CONTEXT_TYPE (stack_context_top_p[-1]) == VM_CONTEXT_CATCH
+                          || VM_GET_CONTEXT_TYPE (stack_context_top_p[-1]) == VM_CONTEXT_FINALLY_JUMP
+                          || VM_GET_CONTEXT_TYPE (stack_context_top_p[-1]) == VM_CONTEXT_FINALLY_THROW
+                          || VM_GET_CONTEXT_TYPE (stack_context_top_p[-1]) == VM_CONTEXT_FINALLY_RETURN);
+
+            JERRY_ASSERT (!(stack_context_top_p[-1] & VM_CONTEXT_HAS_LEX_ENV));
+
+            stack_context_top_p[-1] |= VM_CONTEXT_HAS_LEX_ENV;
+          }
+#else /* !ENABLED (JERRY_ES2015) */
+          JERRY_ASSERT (VM_GET_CONTEXT_TYPE (stack_top_p[-2]) == VM_CONTEXT_CATCH
+                        && !(stack_top_p[-2] & VM_CONTEXT_HAS_LEX_ENV));
+
+          stack_top_p[-2] |= VM_CONTEXT_HAS_LEX_ENV;
+#endif /* ENABLED (JERRY_ES2015) */
+
+          frame_ctx_p->lex_env_p = ecma_create_decl_lex_env (frame_ctx_p->lex_env_p);
+          frame_ctx_p->lex_env_p->type_flags_refs |= (uint16_t) ECMA_OBJECT_FLAG_BLOCK;
+
+          continue;
+        }
         case VM_OC_WITH:
         {
           ecma_value_t value = *(--stack_top_p);
@@ -2752,7 +3432,7 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
 
           branch_offset += (int32_t) (byte_code_start_p - frame_ctx_p->byte_code_start_p);
 
-          JERRY_ASSERT (frame_ctx_p->registers_p + register_end + frame_ctx_p->context_depth == stack_top_p);
+          JERRY_ASSERT (VM_GET_REGISTERS (frame_ctx_p) + register_end + frame_ctx_p->context_depth == stack_top_p);
 
           result = ecma_op_to_object (value);
           ecma_free_value (value);
@@ -2772,8 +3452,9 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
           VM_PLUS_EQUAL_U16 (frame_ctx_p->context_depth, PARSER_WITH_CONTEXT_STACK_ALLOCATION);
           stack_top_p += PARSER_WITH_CONTEXT_STACK_ALLOCATION;
 
-          stack_top_p[-1] = VM_CREATE_CONTEXT (VM_CONTEXT_WITH, branch_offset);
+          stack_top_p[-1] = VM_CREATE_CONTEXT_WITH_ENV (VM_CONTEXT_WITH, branch_offset);
 
+          with_env_p->type_flags_refs |= (uint16_t) ECMA_OBJECT_FLAG_BLOCK;
           frame_ctx_p->lex_env_p = with_env_p;
           continue;
         }
@@ -2781,14 +3462,29 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
         {
           ecma_value_t value = *(--stack_top_p);
 
-          JERRY_ASSERT (frame_ctx_p->registers_p + register_end + frame_ctx_p->context_depth == stack_top_p);
+          JERRY_ASSERT (VM_GET_REGISTERS (frame_ctx_p) + register_end + frame_ctx_p->context_depth == stack_top_p);
+
+#if ENABLED (JERRY_ES2015_BUILTIN_PROXY)
+          if (ecma_is_value_object (value)
+              && ECMA_OBJECT_IS_PROXY (ecma_get_object_from_value (value)))
+          {
+            /* Note: - For proxy objects we should create a new object which implements the iterable protocol,
+                       and iterates through the enumerated collection below.
+                     - This inkoves that the VM context type should be adjusted and checked in all FOR-IN related
+                       instruction.
+                     - For other objects we should keep the current implementation due to performance reasons.*/
+            result = ecma_raise_type_error (ECMA_ERR_MSG ("UNIMPLEMENTED: Proxy support in for-in."));
+            goto error;
+          }
+#endif /* ENABLED (JERRY_ES2015_BUILTIN_PROXY) */
 
           ecma_value_t expr_obj_value = ECMA_VALUE_UNDEFINED;
-          ecma_collection_chunk_t *prop_names_p = opfunc_for_in (value, &expr_obj_value);
+          ecma_collection_t *prop_names_p = opfunc_for_in (value, &expr_obj_value);
           ecma_free_value (value);
 
           if (prop_names_p == NULL)
           {
+            /* The collection is already released */
             byte_code_p = byte_code_start_p + branch_offset;
             continue;
           }
@@ -2797,114 +3493,189 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
 
           VM_PLUS_EQUAL_U16 (frame_ctx_p->context_depth, PARSER_FOR_IN_CONTEXT_STACK_ALLOCATION);
           stack_top_p += PARSER_FOR_IN_CONTEXT_STACK_ALLOCATION;
-          stack_top_p[-1] = (ecma_value_t) VM_CREATE_CONTEXT (VM_CONTEXT_FOR_IN, branch_offset);
+          stack_top_p[-1] = VM_CREATE_CONTEXT (VM_CONTEXT_FOR_IN, branch_offset);
           ECMA_SET_INTERNAL_VALUE_ANY_POINTER (stack_top_p[-2], prop_names_p);
           stack_top_p[-3] = 0;
           stack_top_p[-4] = expr_obj_value;
 
+#if ENABLED (JERRY_ES2015)
+          if (byte_code_p[0] == CBC_EXT_OPCODE && byte_code_p[1] == CBC_EXT_CLONE_CONTEXT)
+          {
+            /* No need to duplicate the first context. */
+            byte_code_p += 2;
+          }
+#endif /* ENABLED (JERRY_ES2015) */
           continue;
         }
         case VM_OC_FOR_IN_GET_NEXT:
         {
-          ecma_value_t *context_top_p = frame_ctx_p->registers_p + register_end + frame_ctx_p->context_depth;
+          ecma_value_t *context_top_p = VM_GET_REGISTERS (frame_ctx_p) + register_end + frame_ctx_p->context_depth;
 
-          ecma_collection_chunk_t *chunk_p;
-          chunk_p = ECMA_GET_INTERNAL_VALUE_ANY_POINTER (ecma_collection_chunk_t, context_top_p[-2]);
+          ecma_collection_t *collection_p;
+          collection_p = ECMA_GET_INTERNAL_VALUE_POINTER (ecma_collection_t, context_top_p[-2]);
 
           JERRY_ASSERT (VM_GET_CONTEXT_TYPE (context_top_p[-1]) == VM_CONTEXT_FOR_IN);
 
           uint32_t index = context_top_p[-3];
+          ecma_value_t *buffer_p = collection_p->buffer_p;
 
-          JERRY_ASSERT (!ecma_is_value_pointer (chunk_p->items[index]));
-
-          *stack_top_p++ = chunk_p->items[index];
-          index++;
-
-          if (JERRY_LIKELY (!ecma_is_value_pointer (chunk_p->items[index])))
-          {
-            context_top_p[-3] = index;
-            continue;
-          }
-
-          context_top_p[-3] = 0;
-
-          ecma_collection_chunk_t *next_chunk_p;
-          next_chunk_p = (ecma_collection_chunk_t *) ecma_get_pointer_from_value (chunk_p->items[index]);
-          ECMA_SET_INTERNAL_VALUE_ANY_POINTER (context_top_p[-2], next_chunk_p);
-
-          jmem_heap_free_block (chunk_p, sizeof (ecma_collection_chunk_t));
+          *stack_top_p++ = buffer_p[index];
+          context_top_p[-3]++;
           continue;
         }
         case VM_OC_FOR_IN_HAS_NEXT:
         {
-          JERRY_ASSERT (frame_ctx_p->registers_p + register_end + frame_ctx_p->context_depth == stack_top_p);
+          JERRY_ASSERT (VM_GET_REGISTERS (frame_ctx_p) + register_end + frame_ctx_p->context_depth == stack_top_p);
 
-          ecma_collection_chunk_t *chunk_p;
-          chunk_p = ECMA_GET_INTERNAL_VALUE_ANY_POINTER (ecma_collection_chunk_t, stack_top_p[-2]);
+          ecma_collection_t *collection_p;
+          collection_p = ECMA_GET_INTERNAL_VALUE_POINTER (ecma_collection_t, stack_top_p[-2]);
 
-          uint32_t index = stack_top_p[-3];
+          JERRY_ASSERT (VM_GET_CONTEXT_TYPE (stack_top_p[-1]) == VM_CONTEXT_FOR_IN);
+
+          ecma_value_t *buffer_p = collection_p->buffer_p;
           ecma_object_t *object_p = ecma_get_object_from_value (stack_top_p[-4]);
+          uint32_t index = stack_top_p[-3];
+#if ENABLED (JERRY_ES2015_BUILTIN_PROXY)
+          JERRY_ASSERT (!ECMA_OBJECT_IS_PROXY (object_p));
+#endif /* ENABLED (JERRY_ES2015_BUILTIN_PROXY) */
 
-          while (true)
+          while (index < collection_p->item_count)
           {
-            if (chunk_p == NULL)
-            {
-              ecma_deref_object (object_p);
+            ecma_string_t *prop_name_p = ecma_get_prop_name_from_value (buffer_p[index]);
 
-              VM_MINUS_EQUAL_U16 (frame_ctx_p->context_depth, PARSER_FOR_IN_CONTEXT_STACK_ALLOCATION);
-              stack_top_p -= PARSER_FOR_IN_CONTEXT_STACK_ALLOCATION;
-              break;
-            }
+            result = ecma_op_object_has_property (object_p, prop_name_p);
 
-            ecma_string_t *prop_name_p = ecma_get_string_from_value (chunk_p->items[index]);
-
-            if (JERRY_LIKELY (ecma_op_object_has_property (object_p, prop_name_p)))
+            if (JERRY_LIKELY (ecma_is_value_true (result)))
             {
               byte_code_p = byte_code_start_p + branch_offset;
               break;
             }
 
-            index++;
-            ecma_value_t value = chunk_p->items[index];
-
-            if (JERRY_LIKELY (!ecma_is_value_pointer (value)))
-            {
-              stack_top_p[-3] = index;
-            }
-            else
-            {
-              index = 0;
-              stack_top_p[-3] = 0;
-
-              ecma_collection_chunk_t *next_chunk_p;
-              next_chunk_p = (ecma_collection_chunk_t *) ecma_get_pointer_from_value (value);
-              ECMA_SET_INTERNAL_VALUE_ANY_POINTER (stack_top_p[-2], next_chunk_p);
-
-              jmem_heap_free_block (chunk_p, sizeof (ecma_collection_chunk_t));
-              chunk_p = next_chunk_p;
-            }
-
             ecma_deref_ecma_string (prop_name_p);
+            index++;
+          }
+
+          if (index == collection_p->item_count)
+          {
+            ecma_deref_object (object_p);
+            ecma_collection_destroy (collection_p);
+            VM_MINUS_EQUAL_U16 (frame_ctx_p->context_depth, PARSER_FOR_IN_CONTEXT_STACK_ALLOCATION);
+            stack_top_p -= PARSER_FOR_IN_CONTEXT_STACK_ALLOCATION;
+          }
+          else
+          {
+            stack_top_p[-3] = index;
           }
           continue;
         }
+#if ENABLED (JERRY_ES2015)
+        case VM_OC_FOR_OF_CREATE_CONTEXT:
+        {
+          ecma_value_t value = *(--stack_top_p);
+
+          JERRY_ASSERT (VM_GET_REGISTERS (frame_ctx_p) + register_end + frame_ctx_p->context_depth == stack_top_p);
+
+          ecma_value_t iterator = ecma_op_get_iterator (value, ECMA_VALUE_EMPTY);
+
+          ecma_free_value (value);
+
+          if (ECMA_IS_VALUE_ERROR (iterator))
+          {
+            result = iterator;
+            goto error;
+          }
+
+          ecma_value_t next_value = ecma_op_iterator_step (iterator);
+
+          if (ECMA_IS_VALUE_ERROR (next_value))
+          {
+            ecma_free_value (iterator);
+            result = next_value;
+            goto error;
+          }
+
+          if (ecma_is_value_false (next_value))
+          {
+            ecma_free_value (iterator);
+            byte_code_p = byte_code_start_p + branch_offset;
+            continue;
+          }
+
+          branch_offset += (int32_t) (byte_code_start_p - frame_ctx_p->byte_code_start_p);
+
+          VM_PLUS_EQUAL_U16 (frame_ctx_p->context_depth, PARSER_FOR_OF_CONTEXT_STACK_ALLOCATION);
+          stack_top_p += PARSER_FOR_OF_CONTEXT_STACK_ALLOCATION;
+          stack_top_p[-1] = VM_CREATE_CONTEXT (VM_CONTEXT_FOR_OF, branch_offset) | VM_CONTEXT_CLOSE_ITERATOR;
+          stack_top_p[-2] = next_value;
+          stack_top_p[-3] = iterator;
+
+          if (byte_code_p[0] == CBC_EXT_OPCODE && byte_code_p[1] == CBC_EXT_CLONE_CONTEXT)
+          {
+            /* No need to duplicate the first context. */
+            byte_code_p += 2;
+          }
+          continue;
+        }
+        case VM_OC_FOR_OF_GET_NEXT:
+        {
+          ecma_value_t *context_top_p = VM_GET_REGISTERS (frame_ctx_p) + register_end + frame_ctx_p->context_depth;
+          JERRY_ASSERT (VM_GET_CONTEXT_TYPE (context_top_p[-1]) == VM_CONTEXT_FOR_OF);
+
+          ecma_value_t next_value = ecma_op_iterator_value (context_top_p[-2]);
+
+          if (ECMA_IS_VALUE_ERROR (next_value))
+          {
+            result = next_value;
+            goto error;
+          }
+
+          *stack_top_p++ = next_value;
+          continue;
+        }
+        case VM_OC_FOR_OF_HAS_NEXT:
+        {
+          JERRY_ASSERT (VM_GET_REGISTERS (frame_ctx_p) + register_end + frame_ctx_p->context_depth == stack_top_p);
+
+          ecma_value_t next_value = ecma_op_iterator_step (stack_top_p[-3]);
+
+          if (ECMA_IS_VALUE_ERROR (next_value))
+          {
+            result = next_value;
+            goto error;
+          }
+
+          if (!ecma_is_value_false (next_value))
+          {
+            ecma_free_value (stack_top_p[-2]);
+            stack_top_p[-2] = next_value;
+            byte_code_p = byte_code_start_p + branch_offset;
+            continue;
+          }
+
+          ecma_free_value (stack_top_p[-2]);
+          ecma_free_value (stack_top_p[-3]);
+          VM_MINUS_EQUAL_U16 (frame_ctx_p->context_depth, PARSER_FOR_OF_CONTEXT_STACK_ALLOCATION);
+          stack_top_p -= PARSER_FOR_OF_CONTEXT_STACK_ALLOCATION;
+          continue;
+        }
+#endif /* ENABLED (JERRY_ES2015) */
         case VM_OC_TRY:
         {
           /* Try opcode simply creates the try context. */
           branch_offset += (int32_t) (byte_code_start_p - frame_ctx_p->byte_code_start_p);
 
-          JERRY_ASSERT (frame_ctx_p->registers_p + register_end + frame_ctx_p->context_depth == stack_top_p);
+          JERRY_ASSERT (VM_GET_REGISTERS (frame_ctx_p) + register_end + frame_ctx_p->context_depth == stack_top_p);
 
           VM_PLUS_EQUAL_U16 (frame_ctx_p->context_depth, PARSER_TRY_CONTEXT_STACK_ALLOCATION);
           stack_top_p += PARSER_TRY_CONTEXT_STACK_ALLOCATION;
 
-          stack_top_p[-1] = (ecma_value_t) VM_CREATE_CONTEXT (VM_CONTEXT_TRY, branch_offset);
+          stack_top_p[-1] = VM_CREATE_CONTEXT (VM_CONTEXT_TRY, branch_offset);
           continue;
         }
         case VM_OC_CATCH:
         {
           /* Catches are ignored and turned to jumps. */
-          JERRY_ASSERT (frame_ctx_p->registers_p + register_end + frame_ctx_p->context_depth == stack_top_p);
+          JERRY_ASSERT (VM_GET_REGISTERS (frame_ctx_p) + register_end + frame_ctx_p->context_depth == stack_top_p);
           JERRY_ASSERT (VM_GET_CONTEXT_TYPE (stack_top_p[-1]) == VM_CONTEXT_TRY);
 
           byte_code_p = byte_code_start_p + branch_offset;
@@ -2914,87 +3685,96 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
         {
           branch_offset += (int32_t) (byte_code_start_p - frame_ctx_p->byte_code_start_p);
 
-          JERRY_ASSERT (frame_ctx_p->registers_p + register_end + frame_ctx_p->context_depth == stack_top_p);
+          JERRY_ASSERT (VM_GET_REGISTERS (frame_ctx_p) + register_end + frame_ctx_p->context_depth == stack_top_p);
 
           JERRY_ASSERT (VM_GET_CONTEXT_TYPE (stack_top_p[-1]) == VM_CONTEXT_TRY
                         || VM_GET_CONTEXT_TYPE (stack_top_p[-1]) == VM_CONTEXT_CATCH);
 
-          if (VM_GET_CONTEXT_TYPE (stack_top_p[-1]) == VM_CONTEXT_CATCH)
+          if (stack_top_p[-1] & VM_CONTEXT_HAS_LEX_ENV)
           {
             ecma_object_t *lex_env_p = frame_ctx_p->lex_env_p;
-            frame_ctx_p->lex_env_p = ecma_get_lex_env_outer_reference (lex_env_p);
+            JERRY_ASSERT (lex_env_p->u2.outer_reference_cp != JMEM_CP_NULL);
+            frame_ctx_p->lex_env_p = ECMA_GET_NON_NULL_POINTER (ecma_object_t, lex_env_p->u2.outer_reference_cp);
             ecma_deref_object (lex_env_p);
+
+            stack_top_p[-1] &= (ecma_value_t) ~VM_CONTEXT_HAS_LEX_ENV;
           }
 
-          stack_top_p[-1] = (ecma_value_t) VM_CREATE_CONTEXT (VM_CONTEXT_FINALLY_JUMP, branch_offset);
+          stack_top_p[-1] = VM_CREATE_CONTEXT (VM_CONTEXT_FINALLY_JUMP, branch_offset);
           stack_top_p[-2] = (ecma_value_t) branch_offset;
           continue;
         }
         case VM_OC_CONTEXT_END:
         {
-          JERRY_ASSERT (frame_ctx_p->registers_p + register_end + frame_ctx_p->context_depth == stack_top_p);
+          JERRY_ASSERT (VM_GET_REGISTERS (frame_ctx_p) + register_end + frame_ctx_p->context_depth == stack_top_p);
+          JERRY_ASSERT (!(stack_top_p[-1] & VM_CONTEXT_CLOSE_ITERATOR));
 
-          switch (VM_GET_CONTEXT_TYPE (stack_top_p[-1]))
+          ecma_value_t context_type = VM_GET_CONTEXT_TYPE (stack_top_p[-1]);
+
+          if (!VM_CONTEXT_IS_FINALLY (context_type))
           {
-            case VM_CONTEXT_FINALLY_JUMP:
-            {
-              uint32_t jump_target = stack_top_p[-2];
+            stack_top_p = vm_stack_context_abort (frame_ctx_p, stack_top_p);
 
-              VM_MINUS_EQUAL_U16 (frame_ctx_p->context_depth,
-                                  PARSER_TRY_CONTEXT_STACK_ALLOCATION);
-              stack_top_p -= PARSER_TRY_CONTEXT_STACK_ALLOCATION;
-
-              if (vm_stack_find_finally (frame_ctx_p,
-                                         &stack_top_p,
-                                         VM_CONTEXT_FINALLY_JUMP,
-                                         jump_target))
-              {
-                JERRY_ASSERT (VM_GET_CONTEXT_TYPE (stack_top_p[-1]) == VM_CONTEXT_FINALLY_JUMP);
-                byte_code_p = frame_ctx_p->byte_code_p;
-                stack_top_p[-2] = jump_target;
-              }
-              else
-              {
-                byte_code_p = frame_ctx_p->byte_code_start_p + jump_target;
-              }
-              break;
-            }
-            case VM_CONTEXT_FINALLY_THROW:
-            {
-              JERRY_CONTEXT (error_value) = stack_top_p[-2];
-              JERRY_CONTEXT (status_flags) |= ECMA_STATUS_EXCEPTION;
-
-              VM_MINUS_EQUAL_U16 (frame_ctx_p->context_depth,
-                                  PARSER_TRY_CONTEXT_STACK_ALLOCATION);
-              stack_top_p -= PARSER_TRY_CONTEXT_STACK_ALLOCATION;
-              result = ECMA_VALUE_ERROR;
-
-#ifdef JERRY_DEBUGGER
-              JERRY_DEBUGGER_SET_FLAGS (JERRY_DEBUGGER_VM_EXCEPTION_THROWN);
-#endif /* JERRY_DEBUGGER */
-              goto error;
-            }
-            case VM_CONTEXT_FINALLY_RETURN:
-            {
-              result = stack_top_p[-2];
-
-              VM_MINUS_EQUAL_U16 (frame_ctx_p->context_depth,
-                                  PARSER_TRY_CONTEXT_STACK_ALLOCATION);
-              stack_top_p -= PARSER_TRY_CONTEXT_STACK_ALLOCATION;
-              goto error;
-            }
-            default:
-            {
-              stack_top_p = vm_stack_context_abort (frame_ctx_p, stack_top_p);
-            }
+            JERRY_ASSERT (VM_GET_REGISTERS (frame_ctx_p) + register_end + frame_ctx_p->context_depth == stack_top_p);
+            continue;
           }
 
-          JERRY_ASSERT (frame_ctx_p->registers_p + register_end + frame_ctx_p->context_depth == stack_top_p);
+#if ENABLED (JERRY_ES2015)
+          if (stack_top_p[-1] & VM_CONTEXT_HAS_LEX_ENV)
+          {
+            ecma_object_t *lex_env_p = frame_ctx_p->lex_env_p;
+            JERRY_ASSERT (lex_env_p->u2.outer_reference_cp != JMEM_CP_NULL);
+            frame_ctx_p->lex_env_p = ECMA_GET_NON_NULL_POINTER (ecma_object_t, lex_env_p->u2.outer_reference_cp);
+            ecma_deref_object (lex_env_p);
+          }
+#endif /* ENABLED (JERRY_ES2015) */
+
+          VM_MINUS_EQUAL_U16 (frame_ctx_p->context_depth,
+                              PARSER_TRY_CONTEXT_STACK_ALLOCATION);
+          stack_top_p -= PARSER_TRY_CONTEXT_STACK_ALLOCATION;
+
+          if (context_type == VM_CONTEXT_FINALLY_RETURN)
+          {
+            result = *stack_top_p;
+            goto error;
+          }
+
+          if (context_type == VM_CONTEXT_FINALLY_THROW)
+          {
+            jcontext_raise_exception (*stack_top_p);
+            result = ECMA_VALUE_ERROR;
+
+#if ENABLED (JERRY_DEBUGGER)
+            JERRY_DEBUGGER_SET_FLAGS (JERRY_DEBUGGER_VM_EXCEPTION_THROWN);
+#endif /* ENABLED (JERRY_DEBUGGER) */
+            goto error;
+          }
+
+          JERRY_ASSERT (context_type == VM_CONTEXT_FINALLY_JUMP);
+
+          uint32_t jump_target = *stack_top_p;
+
+          if (vm_stack_find_finally (frame_ctx_p,
+                                     &stack_top_p,
+                                     VM_CONTEXT_FINALLY_JUMP,
+                                     jump_target))
+          {
+            JERRY_ASSERT (VM_GET_CONTEXT_TYPE (stack_top_p[-1]) == VM_CONTEXT_FINALLY_JUMP);
+            byte_code_p = frame_ctx_p->byte_code_p;
+            stack_top_p[-2] = jump_target;
+          }
+          else
+          {
+            byte_code_p = frame_ctx_p->byte_code_start_p + jump_target;
+          }
+
+          JERRY_ASSERT (VM_GET_REGISTERS (frame_ctx_p) + register_end + frame_ctx_p->context_depth == stack_top_p);
           continue;
         }
         case VM_OC_JUMP_AND_EXIT_CONTEXT:
         {
-          JERRY_ASSERT (frame_ctx_p->registers_p + register_end + frame_ctx_p->context_depth == stack_top_p);
+          JERRY_ASSERT (VM_GET_REGISTERS (frame_ctx_p) + register_end + frame_ctx_p->context_depth == stack_top_p);
+          JERRY_ASSERT (!jcontext_has_pending_exception ());
 
           branch_offset += (int32_t) (byte_code_start_p - frame_ctx_p->byte_code_start_p);
 
@@ -3012,10 +3792,18 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
             byte_code_p = frame_ctx_p->byte_code_start_p + branch_offset;
           }
 
-          JERRY_ASSERT (frame_ctx_p->registers_p + register_end + frame_ctx_p->context_depth == stack_top_p);
+#if ENABLED (JERRY_ES2015)
+          if (jcontext_has_pending_exception ())
+          {
+            result = ECMA_VALUE_ERROR;
+            goto error;
+          }
+#endif /* ENABLED (JERRY_ES2015) */
+
+          JERRY_ASSERT (VM_GET_REGISTERS (frame_ctx_p) + register_end + frame_ctx_p->context_depth == stack_top_p);
           continue;
         }
-#ifdef JERRY_DEBUGGER
+#if ENABLED (JERRY_DEBUGGER)
         case VM_OC_BREAKPOINT_ENABLED:
         {
           if (JERRY_CONTEXT (debugger_flags) & JERRY_DEBUGGER_VM_IGNORE)
@@ -3089,37 +3877,15 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
           }
           continue;
         }
-#endif /* JERRY_DEBUGGER */
-#ifdef JERRY_ENABLE_LINE_INFO
+#endif /* ENABLED (JERRY_DEBUGGER) */
+#if ENABLED (JERRY_LINE_INFO) || ENABLED (JERRY_ES2015_MODULE_SYSTEM)
         case VM_OC_RESOURCE_NAME:
         {
-          ecma_length_t formal_params_number = 0;
-
-          if (CBC_NON_STRICT_ARGUMENTS_NEEDED (bytecode_header_p))
-          {
-            if (bytecode_header_p->status_flags & CBC_CODE_FLAGS_UINT16_ARGUMENTS)
-            {
-              cbc_uint16_arguments_t *args_p = (cbc_uint16_arguments_t *) bytecode_header_p;
-
-              formal_params_number = args_p->argument_end;
-            }
-            else
-            {
-              cbc_uint8_arguments_t *args_p = (cbc_uint8_arguments_t *) bytecode_header_p;
-
-              formal_params_number = args_p->argument_end;
-            }
-          }
-
-          uint8_t *byte_p = (uint8_t *) bytecode_header_p;
-          byte_p += ((size_t) bytecode_header_p->size) << JMEM_ALIGNMENT_LOG;
-
-          ecma_value_t *resource_name_p = (ecma_value_t *) byte_p;
-          resource_name_p -= formal_params_number;
-
-          frame_ctx_p->resource_name = resource_name_p[-1];
+          frame_ctx_p->resource_name = ecma_op_resource_name (bytecode_header_p);
           continue;
         }
+#endif /* ENABLED (JERRY_LINE_INFO) || ENABLED (JERRY_ES2015_MODULE_SYSTEM) */
+#if ENABLED (JERRY_LINE_INFO)
         case VM_OC_LINE:
         {
           uint32_t value = 0;
@@ -3135,7 +3901,8 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
           frame_ctx_p->current_line = value;
           continue;
         }
-#endif /* JERRY_ENABLE_LINE_INFO */
+#endif /* ENABLED (JERRY_LINE_INFO) */
+        case VM_OC_NONE:
         default:
         {
           JERRY_ASSERT (VM_OC_GROUP_GET_INDEX (opcode_data) == VM_OC_NONE);
@@ -3154,9 +3921,8 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
 
         if (literal_index < register_end)
         {
-          ecma_fast_free_value (frame_ctx_p->registers_p[literal_index]);
-
-          frame_ctx_p->registers_p[literal_index] = result;
+          ecma_fast_free_value (VM_GET_REGISTER (frame_ctx_p, literal_index));
+          VM_GET_REGISTER (frame_ctx_p, literal_index) = result;
 
           if (opcode_data & (VM_OC_PUT_STACK | VM_OC_PUT_BLOCK))
           {
@@ -3192,9 +3958,9 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
 
         if (object == ECMA_VALUE_REGISTER_REF)
         {
-          ecma_fast_free_value (frame_ctx_p->registers_p[property]);
-
-          frame_ctx_p->registers_p[property] = result;
+          property = (ecma_value_t) ecma_get_integer_from_value (property);
+          ecma_fast_free_value (VM_GET_REGISTER (frame_ctx_p, property));
+          VM_GET_REGISTER (frame_ctx_p, property) = result;
 
           if (!(opcode_data & (VM_OC_PUT_STACK | VM_OC_PUT_BLOCK)))
           {
@@ -3239,32 +4005,22 @@ free_both_values:
 free_left_value:
       ecma_fast_free_value (left_value);
     }
-error:
 
+error:
     ecma_fast_free_value (left_value);
     ecma_fast_free_value (right_value);
 
     if (ECMA_IS_VALUE_ERROR (result))
     {
-      ecma_value_t *vm_stack_p = stack_top_p;
+      JERRY_ASSERT (jcontext_has_pending_exception ());
+      ecma_value_t *stack_bottom_p = VM_GET_REGISTERS (frame_ctx_p) + register_end + frame_ctx_p->context_depth;
 
-      for (vm_stack_p = frame_ctx_p->registers_p + register_end + frame_ctx_p->context_depth;
-           vm_stack_p < stack_top_p;
-           vm_stack_p++)
+      while (stack_top_p > stack_bottom_p)
       {
-        if (*vm_stack_p == ECMA_VALUE_REGISTER_REF)
-        {
-          JERRY_ASSERT (vm_stack_p < stack_top_p);
-          vm_stack_p++;
-        }
-        else
-        {
-          ecma_free_value (*vm_stack_p);
-        }
+        ecma_fast_free_value (*(--stack_top_p));
       }
 
-      stack_top_p = frame_ctx_p->registers_p + register_end + frame_ctx_p->context_depth;
-#ifdef JERRY_DEBUGGER
+#if ENABLED (JERRY_DEBUGGER)
       const uint32_t dont_stop = (JERRY_DEBUGGER_VM_IGNORE_EXCEPTION
                                   | JERRY_DEBUGGER_VM_IGNORE
                                   | JERRY_DEBUGGER_VM_EXCEPTION_THROWN);
@@ -3278,7 +4034,7 @@ error:
            therefore an evaluation error, or user-created error throw would overwrite it. */
         ecma_value_t current_error_value = JERRY_CONTEXT (error_value);
 
-        if (jerry_debugger_send_exception_string ())
+        if (jerry_debugger_send_exception_string (current_error_value))
         {
           jerry_debugger_breakpoint_hit (JERRY_DEBUGGER_EXCEPTION_HIT);
 
@@ -3294,10 +4050,10 @@ error:
           JERRY_DEBUGGER_SET_FLAGS (JERRY_DEBUGGER_VM_EXCEPTION_THROWN);
         }
       }
-#endif /* JERRY_DEBUGGER */
+#endif /* ENABLED (JERRY_DEBUGGER) */
     }
 
-    JERRY_ASSERT (frame_ctx_p->registers_p + register_end + frame_ctx_p->context_depth == stack_top_p);
+    JERRY_ASSERT (VM_GET_REGISTERS (frame_ctx_p) + register_end + frame_ctx_p->context_depth == stack_top_p);
 
     if (frame_ctx_p->context_depth == 0)
     {
@@ -3316,57 +4072,57 @@ error:
                                  0))
       {
         JERRY_ASSERT (VM_GET_CONTEXT_TYPE (stack_top_p[-1]) == VM_CONTEXT_FINALLY_RETURN);
-        JERRY_ASSERT (frame_ctx_p->registers_p + register_end + frame_ctx_p->context_depth == stack_top_p);
+        JERRY_ASSERT (VM_GET_REGISTERS (frame_ctx_p) + register_end + frame_ctx_p->context_depth == stack_top_p);
+
+#if ENABLED (JERRY_ES2015)
+        if (jcontext_has_pending_exception ())
+        {
+          stack_top_p[-1] = (ecma_value_t) (stack_top_p[-1] - VM_CONTEXT_FINALLY_RETURN + VM_CONTEXT_FINALLY_THROW);
+          ecma_free_value (result);
+          result = jcontext_take_exception ();
+        }
+#endif /* ENABLED (JERRY_ES2015) */
 
         byte_code_p = frame_ctx_p->byte_code_p;
         stack_top_p[-2] = result;
         continue;
       }
+
+#if ENABLED (JERRY_ES2015)
+      if (jcontext_has_pending_exception ())
+      {
+        ecma_free_value (result);
+        result = ECMA_VALUE_ERROR;
+      }
+#endif /* ENABLED (JERRY_ES2015) */
     }
-    else if (JERRY_CONTEXT (status_flags) & ECMA_STATUS_EXCEPTION)
+    else if (jcontext_has_pending_exception () && !jcontext_has_pending_abort ())
     {
       if (vm_stack_find_finally (frame_ctx_p,
                                  &stack_top_p,
                                  VM_CONTEXT_FINALLY_THROW,
                                  0))
       {
-        JERRY_ASSERT (frame_ctx_p->registers_p + register_end + frame_ctx_p->context_depth == stack_top_p);
+        JERRY_ASSERT (VM_GET_REGISTERS (frame_ctx_p) + register_end + frame_ctx_p->context_depth == stack_top_p);
+        JERRY_ASSERT (!(stack_top_p[-1] & VM_CONTEXT_HAS_LEX_ENV));
 
-#ifdef JERRY_DEBUGGER
+#if ENABLED (JERRY_DEBUGGER)
         JERRY_DEBUGGER_CLEAR_FLAGS (JERRY_DEBUGGER_VM_EXCEPTION_THROWN);
-#endif /* JERRY_DEBUGGER */
+#endif /* ENABLED (JERRY_DEBUGGER) */
+
+        result = jcontext_take_exception ();
 
         byte_code_p = frame_ctx_p->byte_code_p;
 
-        if (VM_GET_CONTEXT_TYPE (stack_top_p[-1]) == VM_CONTEXT_CATCH)
+        if (VM_GET_CONTEXT_TYPE (stack_top_p[-1]) == VM_CONTEXT_FINALLY_THROW)
         {
-          *stack_top_p++ = JERRY_CONTEXT (error_value);
-
-          JERRY_ASSERT (byte_code_p[0] == CBC_ASSIGN_SET_IDENT);
-
-          uint32_t literal_index = byte_code_p[1];
-
-          if (literal_index >= encoding_limit)
-          {
-            literal_index = ((literal_index << 8) | byte_code_p[2]) - encoding_delta;
-          }
-
-          ecma_object_t *catch_env_p = ecma_create_decl_lex_env (frame_ctx_p->lex_env_p);
-#ifdef JERRY_DEBUGGER
-          catch_env_p->type_flags_refs |= (uint16_t) ECMA_OBJECT_FLAG_NON_CLOSURE;
-#endif /* JERRY_DEBUGGER */
-
-          ecma_string_t *catch_name_p = ecma_get_string_from_value (literal_start_p[literal_index]);
-          ecma_op_create_mutable_binding (catch_env_p, catch_name_p, false);
-
-          frame_ctx_p->lex_env_p = catch_env_p;
-        }
-        else
-        {
-          JERRY_ASSERT (VM_GET_CONTEXT_TYPE (stack_top_p[-1]) == VM_CONTEXT_FINALLY_THROW);
-          stack_top_p[-2] = JERRY_CONTEXT (error_value);
+          stack_top_p[-2] = result;
+          continue;
         }
 
+        JERRY_ASSERT (VM_GET_CONTEXT_TYPE (stack_top_p[-1]) == VM_CONTEXT_CATCH);
+
+        *stack_top_p++ = result;
         continue;
       }
     }
@@ -3374,7 +4130,7 @@ error:
     {
       do
       {
-        JERRY_ASSERT (frame_ctx_p->registers_p + register_end + frame_ctx_p->context_depth == stack_top_p);
+        JERRY_ASSERT (VM_GET_REGISTERS (frame_ctx_p) + register_end + frame_ctx_p->context_depth == stack_top_p);
 
         stack_top_p = vm_stack_context_abort (frame_ctx_p, stack_top_p);
       }
@@ -3392,20 +4148,30 @@ error:
 #undef READ_LITERAL_INDEX
 
 /**
- * Execute code block.
+ * Initialize code block execution
  *
- * @return ecma value
+ * @return ECMA_VALUE_ERROR - if the initialization fails
+ *         ECMA_VALUE_EMPTY - otherwise
  */
-static ecma_value_t JERRY_ATTR_NOINLINE
-vm_execute (vm_frame_ctx_t *frame_ctx_p, /**< frame context */
-            const ecma_value_t *arg_p, /**< arguments list */
-            ecma_length_t arg_list_len) /**< length of arguments list */
+static void JERRY_ATTR_NOINLINE
+vm_init_exec (vm_frame_ctx_t *frame_ctx_p, /**< frame context */
+              const ecma_value_t *arg_p, /**< arguments list */
+              ecma_length_t arg_list_len) /**< length of arguments list */
 {
-  myinst(0, 1); //flag 0
+  frame_ctx_p->prev_context_p = JERRY_CONTEXT (vm_top_context_p);
+  frame_ctx_p->block_result = ECMA_VALUE_UNDEFINED;
+#if ENABLED (JERRY_LINE_INFO) || ENABLED (JERRY_ES2015_MODULE_SYSTEM)
+  frame_ctx_p->resource_name = ECMA_VALUE_UNDEFINED;
+#endif /* ENABLED (JERRY_LINE_INFO) || ENABLED (JERRY_ES2015_MODULE_SYSTEM) */
+#if ENABLED (JERRY_LINE_INFO)
+  frame_ctx_p->current_line = 0;
+#endif /* ENABLED (JERRY_LINE_INFO) */
+  frame_ctx_p->context_depth = 0;
+  frame_ctx_p->is_eval_code = (arg_p == VM_DIRECT_EVAL);
+
   const ecma_compiled_code_t *bytecode_header_p = frame_ctx_p->bytecode_header_p;
-  ecma_value_t completion_value;
-  uint16_t argument_end;
-  uint16_t register_end;
+  uint16_t argument_end, register_end;
+  ecma_value_t *literal_p;
 
   if (bytecode_header_p->status_flags & CBC_CODE_FLAGS_UINT16_ARGUMENTS)
   {
@@ -3413,6 +4179,11 @@ vm_execute (vm_frame_ctx_t *frame_ctx_p, /**< frame context */
 
     argument_end = args_p->argument_end;
     register_end = args_p->register_end;
+
+    literal_p = (ecma_value_t *) ((uint8_t *) bytecode_header_p + sizeof (cbc_uint16_arguments_t));
+    literal_p -= register_end;
+    frame_ctx_p->literal_start_p = literal_p;
+    literal_p += args_p->literal_end;
   }
   else
   {
@@ -3420,13 +4191,20 @@ vm_execute (vm_frame_ctx_t *frame_ctx_p, /**< frame context */
 
     argument_end = args_p->argument_end;
     register_end = args_p->register_end;
+
+    literal_p = (ecma_value_t *) ((uint8_t *) bytecode_header_p + sizeof (cbc_uint8_arguments_t));
+    literal_p -= register_end;
+    frame_ctx_p->literal_start_p = literal_p;
+    literal_p += args_p->literal_end;
   }
 
-  frame_ctx_p->stack_top_p = frame_ctx_p->registers_p + register_end;
+  frame_ctx_p->byte_code_p = (uint8_t *) literal_p;
+  frame_ctx_p->byte_code_start_p = (uint8_t *) literal_p;
+  frame_ctx_p->stack_top_p = VM_GET_REGISTERS (frame_ctx_p) + register_end;
 
-#if ENABLED (JERRY_ES2015_FUNCTION_REST_PARAMETER)
+#if ENABLED (JERRY_ES2015)
   uint32_t function_call_argument_count = arg_list_len;
-#endif /* ENABLED (JERRY_ES2015_FUNCTION_REST_PARAMETER) */
+#endif /* ENABLED (JERRY_ES2015) */
 
   if (arg_list_len > argument_end)
   {
@@ -3435,14 +4213,14 @@ vm_execute (vm_frame_ctx_t *frame_ctx_p, /**< frame context */
 
   for (uint32_t i = 0; i < arg_list_len; i++)
   {
-    frame_ctx_p->registers_p[i] = ecma_fast_copy_value (arg_p[i]);
+    VM_GET_REGISTER (frame_ctx_p, i) = ecma_fast_copy_value (arg_p[i]);
   }
 
   /* The arg_list_len contains the end of the copied arguments.
    * Fill everything else with undefined. */
   if (register_end > arg_list_len)
   {
-    ecma_value_t *stack_p = frame_ctx_p->registers_p + arg_list_len;
+    ecma_value_t *stack_p = VM_GET_REGISTERS (frame_ctx_p) + arg_list_len;
 
     for (uint32_t i = arg_list_len; i < register_end; i++)
     {
@@ -3450,7 +4228,7 @@ vm_execute (vm_frame_ctx_t *frame_ctx_p, /**< frame context */
     }
   }
 
-#if ENABLED (JERRY_ES2015_FUNCTION_REST_PARAMETER)
+#if ENABLED (JERRY_ES2015)
   if (bytecode_header_p->status_flags & CBC_CODE_FLAGS_REST_PARAMETER)
   {
     JERRY_ASSERT (function_call_argument_count >= arg_list_len);
@@ -3458,20 +4236,25 @@ vm_execute (vm_frame_ctx_t *frame_ctx_p, /**< frame context */
                                                           function_call_argument_count - arg_list_len,
                                                           false);
     JERRY_ASSERT (!ECMA_IS_VALUE_ERROR (new_array));
-    frame_ctx_p->registers_p[argument_end] = new_array;
-    arg_list_len++;
+    VM_GET_REGISTER (frame_ctx_p, argument_end) = new_array;
   }
-#endif /* ENABLED (JERRY_ES2015_FUNCTION_REST_PARAMETER) */
+#endif /* ENABLED (JERRY_ES2015) */
 
   JERRY_CONTEXT (status_flags) &= (uint32_t) ~ECMA_STATUS_DIRECT_EVAL;
-
   JERRY_CONTEXT (vm_top_context_p) = frame_ctx_p;
+} /* vm_init_exec */
 
-  vm_init_loop (frame_ctx_p);
-
+/**
+ * Resume execution of a code block.
+ *
+ * @return ecma value
+ */
+ecma_value_t JERRY_ATTR_NOINLINE
+vm_execute (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
+{
   while (true)
   {
-    completion_value = vm_loop (frame_ctx_p);
+    ecma_value_t completion_value = vm_loop (frame_ctx_p);
 
     switch (frame_ctx_p->call_operation)
     {
@@ -3480,13 +4263,22 @@ vm_execute (vm_frame_ctx_t *frame_ctx_p, /**< frame context */
         opfunc_call (frame_ctx_p);
         break;
       }
-#if ENABLED (JERRY_ES2015_CLASS)
+#if ENABLED (JERRY_ES2015)
       case VM_EXEC_SUPER_CALL:
       {
         vm_super_call (frame_ctx_p);
         break;
       }
-#endif /* ENABLED (JERRY_ES2015_CLASS) */
+      case VM_EXEC_SPREAD_OP:
+      {
+        vm_spread_operation (frame_ctx_p);
+        break;
+      }
+      case VM_EXEC_RETURN:
+      {
+        return completion_value;
+      }
+#endif /* ENABLED (JERRY_ES2015) */
       case VM_EXEC_CONSTRUCT:
       {
         opfunc_construct (frame_ctx_p);
@@ -3496,27 +4288,35 @@ vm_execute (vm_frame_ctx_t *frame_ctx_p, /**< frame context */
       {
         JERRY_ASSERT (frame_ctx_p->call_operation == VM_NO_EXEC_OP);
 
-        /* Free arguments and registers */
-        for (uint32_t i = 0; i < register_end; i++)
+        const ecma_compiled_code_t *bytecode_header_p = frame_ctx_p->bytecode_header_p;
+        uint32_t register_end;
+
+        if (bytecode_header_p->status_flags & CBC_CODE_FLAGS_UINT16_ARGUMENTS)
         {
-          ecma_fast_free_value (frame_ctx_p->registers_p[i]);
+          register_end = ((cbc_uint16_arguments_t *) bytecode_header_p)->register_end;
+        }
+        else
+        {
+          register_end = ((cbc_uint8_arguments_t *) bytecode_header_p)->register_end;
         }
 
-#ifdef JERRY_DEBUGGER
+        /* Free arguments and registers */
+        ecma_value_t *registers_p = VM_GET_REGISTERS (frame_ctx_p);
+        for (uint32_t i = 0; i < register_end; i++)
+        {
+          ecma_fast_free_value (registers_p[i]);
+        }
+
+#if ENABLED (JERRY_DEBUGGER)
         if (JERRY_CONTEXT (debugger_stop_context) == JERRY_CONTEXT (vm_top_context_p))
         {
           /* The engine will stop when the next breakpoint is reached. */
           JERRY_ASSERT (JERRY_CONTEXT (debugger_flags) & JERRY_DEBUGGER_VM_STOP);
           JERRY_CONTEXT (debugger_stop_context) = NULL;
         }
-#endif /* JERRY_DEBUGGER */
-
-#ifdef VM_RECURSION_LIMIT
-        JERRY_CONTEXT (vm_recursion_counter)++;
-#endif /* VM_RECURSION_LIMIT */
+#endif /* ENABLED (JERRY_DEBUGGER) */
 
         JERRY_CONTEXT (vm_top_context_p) = frame_ctx_p->prev_context_p;
-        myinst(0, 0); //flag 0
         return completion_value;
       }
     }
@@ -3532,86 +4332,39 @@ ecma_value_t
 vm_run (const ecma_compiled_code_t *bytecode_header_p, /**< byte-code data header */
         ecma_value_t this_binding_value, /**< value of 'ThisBinding' */
         ecma_object_t *lex_env_p, /**< lexical environment to use */
-        uint32_t parse_opts, /**< ecma_parse_opts_t option bits */
         const ecma_value_t *arg_list_p, /**< arguments list */
         ecma_length_t arg_list_len) /**< length of arguments list */
 {
-#ifdef VM_RECURSION_LIMIT
-  if (JERRY_UNLIKELY (JERRY_CONTEXT (vm_recursion_counter) == 0))
-  {
-    return ecma_raise_range_error (ECMA_ERR_MSG ("VM recursion limit is exceeded."));
-  }
-  else
-  {
-    JERRY_CONTEXT (vm_recursion_counter)--;
-  }
-#endif /* VM_RECURSION_LIMIT */
-
-  ecma_value_t *literal_p;
-  vm_frame_ctx_t frame_ctx;
-  uint32_t call_stack_size;
+  myinst(0, 1);
+  vm_frame_ctx_t *frame_ctx_p;
+  size_t frame_size;
 
   if (bytecode_header_p->status_flags & CBC_CODE_FLAGS_UINT16_ARGUMENTS)
   {
     cbc_uint16_arguments_t *args_p = (cbc_uint16_arguments_t *) bytecode_header_p;
-    call_stack_size = (uint32_t) (args_p->register_end + args_p->stack_limit);
-
-    literal_p = (ecma_value_t *) ((uint8_t *) bytecode_header_p + sizeof (cbc_uint16_arguments_t));
-    literal_p -= args_p->register_end;
-    frame_ctx.literal_start_p = literal_p;
-    literal_p += args_p->literal_end;
+    frame_size = (size_t) (args_p->register_end + args_p->stack_limit);
   }
   else
   {
     cbc_uint8_arguments_t *args_p = (cbc_uint8_arguments_t *) bytecode_header_p;
-    call_stack_size = (uint32_t) (args_p->register_end + args_p->stack_limit);
-
-    literal_p = (ecma_value_t *) ((uint8_t *) bytecode_header_p + sizeof (cbc_uint8_arguments_t));
-    literal_p -= args_p->register_end;
-    frame_ctx.literal_start_p = literal_p;
-    literal_p += args_p->literal_end;
+    frame_size = (size_t) (args_p->register_end + args_p->stack_limit);
   }
 
-  frame_ctx.bytecode_header_p = bytecode_header_p;
-  frame_ctx.byte_code_p = (uint8_t *) literal_p;
-  frame_ctx.byte_code_start_p = (uint8_t *) literal_p;
-  frame_ctx.lex_env_p = lex_env_p;
-  frame_ctx.prev_context_p = JERRY_CONTEXT (vm_top_context_p);
-  frame_ctx.this_binding = this_binding_value;
-  frame_ctx.block_result = ECMA_VALUE_UNDEFINED;
-#ifdef JERRY_ENABLE_LINE_INFO
-  frame_ctx.resource_name = ECMA_VALUE_UNDEFINED;
-  frame_ctx.current_line = 0;
-#endif /* JERRY_ENABLE_LINE_INFO */
-  frame_ctx.context_depth = 0;
-  frame_ctx.is_eval_code = parse_opts & ECMA_PARSE_DIRECT_EVAL;
+  frame_size = frame_size * sizeof (ecma_value_t) + sizeof (vm_frame_ctx_t);
+  frame_size = (frame_size + sizeof (uintptr_t) - 1) / sizeof (uintptr_t);
 
   /* Use JERRY_MAX() to avoid array declaration with size 0. */
-  JERRY_VLA (ecma_value_t, stack, JERRY_MAX (call_stack_size, 1));
-  frame_ctx.registers_p = stack;
+  JERRY_VLA (uintptr_t, stack, frame_size);
 
-#if ENABLED (JERRY_ES2015_MODULE_SYSTEM)
-  if (JERRY_CONTEXT (module_top_context_p) != NULL)
-  {
-    ecma_value_t ret_value = ecma_module_connect_imports ();
+  frame_ctx_p = (vm_frame_ctx_t *) stack;
 
-    if (ecma_is_value_empty (ret_value))
-    {
-      ret_value = ecma_module_check_indirect_exports ();
-    }
+  frame_ctx_p->bytecode_header_p = bytecode_header_p;
+  frame_ctx_p->lex_env_p = lex_env_p;
+  frame_ctx_p->this_binding = this_binding_value;
 
-    ecma_module_cleanup ();
-
-    if (!ecma_is_value_empty (ret_value))
-    {
-      return ret_value;
-    }
-
-    JERRY_CONTEXT (module_top_context_p) = NULL;
-  }
-#endif /* ENABLED (JERRY_ES2015_MODULE_SYSTEM) */
-
-  return vm_execute (&frame_ctx, arg_list_p, arg_list_len);
+  vm_init_exec (frame_ctx_p, arg_list_p, arg_list_len);
+  return vm_execute (frame_ctx_p);
+  myinst(0, 0);
 } /* vm_run */
 
 /**

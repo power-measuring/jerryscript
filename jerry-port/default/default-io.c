@@ -13,7 +13,6 @@
  * limitations under the License.
  */
 
-#include <limits.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -85,7 +84,7 @@ jerry_port_log (jerry_log_level_t level, /**< message log level */
   {
     va_list args;
     va_start (args, format);
-#ifdef JERRY_DEBUGGER
+#if defined (JERRY_DEBUGGER) && (JERRY_DEBUGGER == 1)
     int length = vsnprintf (NULL, 0, format, args);
     va_end (args);
     va_start (args, format);
@@ -97,18 +96,18 @@ jerry_port_log (jerry_log_level_t level, /**< message log level */
     jerry_debugger_send_log (level, (jerry_char_t *) buffer, (jerry_size_t) length);
 #else /* If jerry-debugger isn't defined, libc is turned on */
     vfprintf (stderr, format, args);
-#endif /* JERRY_DEBUGGER */
+#endif /* defined (JERRY_DEBUGGER) && (JERRY_DEBUGGER == 1) */
     va_end (args);
   }
 } /* jerry_port_log */
 
-#ifdef JERRY_DEBUGGER
+#if defined (JERRY_DEBUGGER) && (JERRY_DEBUGGER == 1)
 
 #define DEBUG_BUFFER_SIZE (256)
 static char debug_buffer[DEBUG_BUFFER_SIZE];
 static int debug_buffer_index = 0;
 
-#endif /* JERRY_DEBUGGER */
+#endif /* defined (JERRY_DEBUGGER) && (JERRY_DEBUGGER == 1) */
 
 /**
  * Default implementation of jerry_port_print_char. Uses 'putchar' to
@@ -119,7 +118,7 @@ jerry_port_print_char (char c) /**< the character to print */
 {
   putchar (c);
 
-#ifdef JERRY_DEBUGGER
+#if defined (JERRY_DEBUGGER) && (JERRY_DEBUGGER == 1)
   debug_buffer[debug_buffer_index++] = c;
 
   if ((debug_buffer_index == DEBUG_BUFFER_SIZE) || (c == '\n'))
@@ -127,119 +126,5 @@ jerry_port_print_char (char c) /**< the character to print */
     jerry_debugger_send_output ((jerry_char_t *) debug_buffer, (jerry_size_t) debug_buffer_index);
     debug_buffer_index = 0;
   }
-#endif /* JERRY_DEBUGGER */
+#endif /* defined (JERRY_DEBUGGER) && (JERRY_DEBUGGER == 1) */
 } /* jerry_port_print_char */
-
-/**
- * Determines the size of the given file.
- * @return size of the file
- */
-static size_t
-jerry_port_get_file_size (FILE *file_p) /**< opened file */
-{
-  fseek (file_p, 0, SEEK_END);
-  long size = ftell (file_p);
-  fseek (file_p, 0, SEEK_SET);
-
-  return (size_t) size;
-} /* jerry_port_get_file_size */
-
-/**
- * Opens file with the given path and reads its source.
- * @return the source of the file
- */
-uint8_t *
-jerry_port_read_source (const char *file_name_p, /**< file name */
-                        size_t *out_size_p) /**< [out] read bytes */
-{
-  FILE *file_p = fopen (file_name_p, "rb");
-
-  if (file_p == NULL)
-  {
-    jerry_port_log (JERRY_LOG_LEVEL_ERROR, "Error: failed to open file: %s\n", file_name_p);
-    return NULL;
-  }
-
-  size_t file_size = jerry_port_get_file_size (file_p);
-  uint8_t *buffer_p = (uint8_t *) malloc (file_size);
-
-  if (buffer_p == NULL)
-  {
-    fclose (file_p);
-
-    jerry_port_log (JERRY_LOG_LEVEL_ERROR, "Error: failed to allocate memory for module");
-    return NULL;
-  }
-
-  size_t bytes_read = fread (buffer_p, 1u, file_size, file_p);
-
-  if (!bytes_read)
-  {
-    fclose (file_p);
-    free (buffer_p);
-
-    jerry_port_log (JERRY_LOG_LEVEL_ERROR, "Error: failed to read file: %s\n", file_name_p);
-    return NULL;
-  }
-
-  fclose (file_p);
-  *out_size_p = bytes_read;
-
-  return buffer_p;
-} /* jerry_port_read_source */
-
-/**
- * Release the previously opened file's content.
- */
-void
-jerry_port_release_source (uint8_t *buffer_p) /**< buffer to free */
-{
-  free (buffer_p);
-} /* jerry_port_release_source */
-
-/**
- * Normalize a file path
- *
- * @return length of the path written to the output buffer
- */
-size_t
-jerry_port_normalize_path (const char *in_path_p, /**< input file path */
-                           char *out_buf_p,       /**< output buffer */
-                           size_t out_buf_size)   /**< size of output buffer */
-{
-  size_t ret = 0;
-
-#if defined (WIN32)
-  char *norm_p = _fullpath (out_buf_p, in_path_p, out_buf_size);
-
-  if (norm_p != NULL)
-  {
-    ret = strnlen (norm_p, out_buf_size);
-  }
-#elif defined (__unix__) || defined (__APPLE__)
-  char *temp_p = (char *) malloc (PATH_MAX);
-  char *norm_p = realpath (in_path_p, temp_p);
-
-  if (norm_p != NULL)
-  {
-    const size_t len = strnlen (norm_p, out_buf_size);
-    if (len < out_buf_size)
-    {
-      strncpy (out_buf_p, norm_p, out_buf_size);
-      ret = len;
-    }
-  }
-
-  free (temp_p);
-#else
-  /* Do nothing. */
-  const size_t len = strnlen (in_path_p, out_buf_size);
-  if (len < out_buf_size)
-  {
-    strncpy (out_buf_p, in_path_p, out_buf_size);
-    ret = len;
-  }
-#endif
-
-  return ret;
-} /* jerry_port_normalize_path */

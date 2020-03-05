@@ -276,7 +276,9 @@ ecma_builtin_is (ecma_object_t *obj_p, /**< pointer to an object */
 
   /* If a built-in object is not instantiated, its value is NULL,
      hence it cannot be equal to a valid object. */
-  return (obj_p == JERRY_CONTEXT (ecma_builtin_objects)[builtin_id]);
+  jmem_cpointer_t builtin_cp = JERRY_CONTEXT (ecma_builtin_objects)[builtin_id];
+
+  return (builtin_cp != JMEM_CP_NULL && (obj_p == ECMA_GET_NON_NULL_POINTER (ecma_object_t, builtin_cp)));
 } /* ecma_builtin_is */
 
 /**
@@ -292,12 +294,12 @@ ecma_builtin_get (ecma_builtin_id_t builtin_id) /**< id of built-in to check on 
 {
   JERRY_ASSERT (builtin_id < ECMA_BUILTIN_ID__COUNT);
 
-  if (JERRY_UNLIKELY (JERRY_CONTEXT (ecma_builtin_objects)[builtin_id] == NULL))
+  if (JERRY_UNLIKELY (JERRY_CONTEXT (ecma_builtin_objects)[builtin_id] == JMEM_CP_NULL))
   {
     ecma_instantiate_builtin (builtin_id);
   }
 
-  return JERRY_CONTEXT (ecma_builtin_objects)[builtin_id];
+  return ECMA_GET_NON_NULL_POINTER (ecma_object_t, JERRY_CONTEXT (ecma_builtin_objects)[builtin_id]);
 } /* ecma_builtin_get */
 
 /**
@@ -311,9 +313,9 @@ ecma_builtin_get (ecma_builtin_id_t builtin_id) /**< id of built-in to check on 
 inline ecma_object_t * JERRY_ATTR_ALWAYS_INLINE
 ecma_builtin_get_global (void)
 {
-  JERRY_ASSERT (JERRY_CONTEXT (ecma_builtin_objects)[ECMA_BUILTIN_ID_GLOBAL] != NULL);
+  JERRY_ASSERT (JERRY_CONTEXT (ecma_builtin_objects)[ECMA_BUILTIN_ID_GLOBAL] != JMEM_CP_NULL);
 
-  return JERRY_CONTEXT (ecma_builtin_objects)[ECMA_BUILTIN_ID_GLOBAL];
+  return ECMA_GET_NON_NULL_POINTER (ecma_object_t, JERRY_CONTEXT (ecma_builtin_objects)[ECMA_BUILTIN_ID_GLOBAL]);
 } /* ecma_builtin_get_global */
 
 /**
@@ -339,7 +341,7 @@ static void
 ecma_instantiate_builtin (ecma_builtin_id_t obj_builtin_id) /**< built-in id */
 {
   JERRY_ASSERT (obj_builtin_id < ECMA_BUILTIN_ID__COUNT);
-  JERRY_ASSERT (JERRY_CONTEXT (ecma_builtin_objects)[obj_builtin_id] == NULL);
+  JERRY_ASSERT (JERRY_CONTEXT (ecma_builtin_objects)[obj_builtin_id] == JMEM_CP_NULL);
 
   ecma_builtin_descriptor_t builtin_desc = ecma_builtin_descriptors[obj_builtin_id];
   ecma_builtin_id_t object_prototype_builtin_id = (ecma_builtin_id_t) (builtin_desc >> ECMA_BUILTIN_PROTOTYPE_ID_SHIFT);
@@ -352,11 +354,12 @@ ecma_instantiate_builtin (ecma_builtin_id_t obj_builtin_id) /**< built-in id */
   }
   else
   {
-    if (JERRY_CONTEXT (ecma_builtin_objects)[object_prototype_builtin_id] == NULL)
+    if (JERRY_CONTEXT (ecma_builtin_objects)[object_prototype_builtin_id] == JMEM_CP_NULL)
     {
       ecma_instantiate_builtin (object_prototype_builtin_id);
     }
-    prototype_obj_p = JERRY_CONTEXT (ecma_builtin_objects)[object_prototype_builtin_id];
+    prototype_obj_p = ECMA_GET_NON_NULL_POINTER (ecma_object_t,
+                                                 JERRY_CONTEXT (ecma_builtin_objects)[object_prototype_builtin_id]);
     JERRY_ASSERT (prototype_obj_p != NULL);
   }
 
@@ -381,7 +384,14 @@ ecma_instantiate_builtin (ecma_builtin_id_t obj_builtin_id) /**< built-in id */
 
   ecma_object_t *obj_p = ecma_create_object (prototype_obj_p, ext_object_size, obj_type);
 
-  ecma_set_object_extensible (obj_p, (obj_builtin_id != ECMA_BUILTIN_ID_TYPE_ERROR_THROWER));
+  if (JERRY_UNLIKELY (obj_builtin_id == ECMA_BUILTIN_ID_TYPE_ERROR_THROWER))
+  {
+    ecma_op_ordinary_object_prevent_extensions (obj_p);
+  }
+  else
+  {
+    ecma_op_ordinary_object_set_extensible (obj_p);
+  }
 
   /*
    * [[Class]] property of built-in object is not stored explicitly.
@@ -428,7 +438,7 @@ ecma_instantiate_builtin (ecma_builtin_id_t obj_builtin_id) /**< built-in id */
       ecma_extended_object_t *ext_object_p = (ecma_extended_object_t *) obj_p;
 
       ext_object_p->u.array.length = 0;
-      ext_object_p->u.array.length_prop = ECMA_PROPERTY_FLAG_WRITABLE | ECMA_PROPERTY_TYPE_VIRTUAL;
+      ext_object_p->u.array.u.length_prop = ECMA_PROPERTY_FLAG_WRITABLE | ECMA_PROPERTY_TYPE_VIRTUAL;
       break;
     }
 #endif /* ENABLED (JERRY_BUILTIN_ARRAY) */
@@ -502,7 +512,7 @@ ecma_instantiate_builtin (ecma_builtin_id_t obj_builtin_id) /**< built-in id */
     }
   }
 
-  JERRY_CONTEXT (ecma_builtin_objects)[obj_builtin_id] = obj_p;
+  ECMA_SET_NON_NULL_POINTER (JERRY_CONTEXT (ecma_builtin_objects)[obj_builtin_id], obj_p);
 } /* ecma_instantiate_builtin */
 
 /**
@@ -515,10 +525,10 @@ ecma_finalize_builtins (void)
        id < ECMA_BUILTIN_ID__COUNT;
        id = (ecma_builtin_id_t) (id + 1))
   {
-    if (JERRY_CONTEXT (ecma_builtin_objects)[id] != NULL)
+    if (JERRY_CONTEXT (ecma_builtin_objects)[id] != JMEM_CP_NULL)
     {
-      ecma_deref_object (JERRY_CONTEXT (ecma_builtin_objects)[id]);
-      JERRY_CONTEXT (ecma_builtin_objects)[id] = NULL;
+      ecma_deref_object (ECMA_GET_NON_NULL_POINTER (ecma_object_t, JERRY_CONTEXT (ecma_builtin_objects)[id]));
+      JERRY_CONTEXT (ecma_builtin_objects)[id] = JMEM_CP_NULL;
     }
   }
 } /* ecma_finalize_builtins */
@@ -653,15 +663,15 @@ ecma_builtin_try_to_instantiate_property (ecma_object_t *object_p, /**< object *
 
   lit_magic_string_id_t magic_string_id = ecma_get_string_magic (string_p);
 
-#if ENABLED (JERRY_ES2015_BUILTIN_SYMBOL)
+#if ENABLED (JERRY_ES2015)
   if (JERRY_UNLIKELY (ecma_prop_name_is_symbol (string_p)))
   {
-    if (string_p->hash & ECMA_GLOBAL_SYMBOL_FLAG)
+    if (string_p->u.hash & ECMA_GLOBAL_SYMBOL_FLAG)
     {
-      magic_string_id = (string_p->hash >> ECMA_GLOBAL_SYMBOL_SHIFT);
+      magic_string_id = (string_p->u.hash >> ECMA_GLOBAL_SYMBOL_SHIFT);
     }
   }
-#endif /* ENABLED (JERRY_ES2015_BUILTIN_SYMBOL) */
+#endif /* ENABLED (JERRY_ES2015) */
 
   if (magic_string_id == LIT_MAGIC_STRING__COUNT)
   {
@@ -738,6 +748,11 @@ ecma_builtin_try_to_instantiate_property (ecma_object_t *object_p, /**< object *
         {
           ECMA_NUMBER_MAX_VALUE,
           ECMA_NUMBER_MIN_VALUE,
+#if ENABLED (JERRY_ES2015)
+          ECMA_NUMBER_EPSILON,
+          ECMA_NUMBER_MAX_SAFE_INTEGER,
+          ECMA_NUMBER_MIN_SAFE_INTEGER,
+#endif /* ENABLED (JERRY_ES2015) */
           ECMA_NUMBER_E,
           ECMA_NUMBER_PI,
           ECMA_NUMBER_LN10,
@@ -745,7 +760,7 @@ ecma_builtin_try_to_instantiate_property (ecma_object_t *object_p, /**< object *
           ECMA_NUMBER_LOG2E,
           ECMA_NUMBER_LOG10E,
           ECMA_NUMBER_SQRT2,
-          ECMA_NUMBER_SQRT_1_2
+          ECMA_NUMBER_SQRT_1_2,
         };
 
         num = builtin_number_list[curr_property_p->value - ECMA_BUILTIN_NUMBER_MAX];
@@ -782,25 +797,42 @@ ecma_builtin_try_to_instantiate_property (ecma_object_t *object_p, /**< object *
       value = ecma_make_magic_string_value ((lit_magic_string_id_t) curr_property_p->value);
       break;
     }
-#if ENABLED (JERRY_ES2015_BUILTIN_SYMBOL)
+#if ENABLED (JERRY_ES2015)
     case ECMA_BUILTIN_PROPERTY_SYMBOL:
     {
-      lit_magic_string_id_t symbol_desc_id = (lit_magic_string_id_t) curr_property_p->magic_string_id;
+      ecma_stringbuilder_t builder = ecma_stringbuilder_create_raw ((lit_utf8_byte_t *) "Symbol.", 7);
 
-      ecma_string_t *symbol_desc_p;
-      symbol_desc_p = ecma_append_magic_string_to_string (ecma_get_magic_string (LIT_MAGIC_STRING_SYMBOL_DOT_UL),
-                                                          symbol_desc_id);
+      lit_magic_string_id_t symbol_desc_id = (lit_magic_string_id_t) curr_property_p->value;
 
-      ecma_value_t symbol_desc_value = ecma_make_string_value (symbol_desc_p);
+      ecma_stringbuilder_append_magic (&builder, symbol_desc_id);
+
+      ecma_value_t symbol_desc_value = ecma_make_string_value (ecma_stringbuilder_finalize (&builder));
 
       ecma_string_t *symbol_p = ecma_new_symbol_from_descriptor_string (symbol_desc_value);
-      lit_magic_string_id_t symbol_id = (lit_magic_string_id_t) curr_property_p->value;
-      symbol_p->hash = (uint16_t) ((symbol_id << ECMA_GLOBAL_SYMBOL_SHIFT) | ECMA_GLOBAL_SYMBOL_FLAG);
+      lit_magic_string_id_t symbol_id = (lit_magic_string_id_t) curr_property_p->magic_string_id;
+      symbol_p->u.hash = (uint16_t) ((symbol_id << ECMA_GLOBAL_SYMBOL_SHIFT) | ECMA_GLOBAL_SYMBOL_FLAG);
 
       value = ecma_make_symbol_value (symbol_p);
       break;
     }
-#endif /* ENABLED (JERRY_ES2015_BUILTIN_SYMBOL) */
+    case ECMA_BUILTIN_PROPERTY_INTRINSIC_PROPERTY:
+    {
+      value = ecma_op_object_get_by_magic_id (ecma_builtin_get (ECMA_BUILTIN_ID_INTRINSIC_OBJECT),
+                                              (lit_magic_string_id_t) curr_property_p->value);
+      break;
+    }
+    case ECMA_BUILTIN_PROPERTY_ACCESSOR_BUILTIN_FUNCTION:
+    {
+      is_accessor = true;
+      uint16_t getter_id = ECMA_ACCESSOR_READ_WRITE_GET_GETTER_ID (curr_property_p->value);
+      uint16_t setter_id = ECMA_ACCESSOR_READ_WRITE_GET_SETTER_ID (curr_property_p->value);
+      getter_p = ecma_builtin_get (getter_id);
+      setter_p = ecma_builtin_get (setter_id);
+      ecma_ref_object (getter_p);
+      ecma_ref_object (setter_p);
+      break;
+    }
+#endif /* ENABLED (JERRY_ES2015) */
     case ECMA_BUILTIN_PROPERTY_OBJECT:
     {
       ecma_object_t *builtin_object_p = ecma_builtin_get ((ecma_builtin_id_t) curr_property_p->value);
@@ -883,30 +915,27 @@ ecma_builtin_try_to_instantiate_property (ecma_object_t *object_p, /**< object *
  */
 void
 ecma_builtin_list_lazy_property_names (ecma_object_t *object_p, /**< a built-in object */
-                                       bool separate_enumerable, /**< true -  list enumerable properties into
-                                                                  *           main collection, and non-enumerable
-                                                                  *           to collection of 'skipped non-enumerable'
-                                                                  *           properties,
-                                                                  *   false - list all properties into main collection.
-                                                                  */
-                                       ecma_collection_header_t *main_collection_p, /**< 'main' collection */
-                                       ecma_collection_header_t *non_enum_collection_p) /**< skipped 'non-enumerable'
-                                                                                         *   collection */
+                                       uint32_t opts, /**< listing options using flags
+                                                       *   from ecma_list_properties_options_t */
+                                       ecma_collection_t *main_collection_p, /**< 'main' collection */
+                                       ecma_collection_t *non_enum_collection_p) /**< skipped 'non-enumerable'
+                                                                                  *   collection */
 {
   JERRY_ASSERT (ecma_get_object_is_builtin (object_p));
+
+  const bool separate_enumerable = (opts & ECMA_LIST_ENUMERABLE) != 0;
+  const bool is_array_indices_only = (opts & ECMA_LIST_ARRAY_INDICES) != 0;
 
   if (ecma_get_object_type (object_p) == ECMA_OBJECT_TYPE_FUNCTION
       && ecma_builtin_function_is_routine (object_p))
   {
-    ecma_collection_header_t *for_enumerable_p = main_collection_p;
+    ecma_collection_t *for_enumerable_p = main_collection_p;
     JERRY_UNUSED (for_enumerable_p);
 
-    ecma_collection_header_t *for_non_enumerable_p = separate_enumerable ? non_enum_collection_p : main_collection_p;
+    ecma_collection_t *for_non_enumerable_p = separate_enumerable ? non_enum_collection_p : main_collection_p;
 
     /* 'length' property is non-enumerable (ECMA-262 v5, 15) */
-    ecma_append_to_values_collection (for_non_enumerable_p,
-                                      ecma_make_magic_string_value (LIT_MAGIC_STRING_LENGTH),
-                                      0);
+    ecma_collection_push_back (for_non_enumerable_p, ecma_make_magic_string_value (LIT_MAGIC_STRING_LENGTH));
   }
   else
   {
@@ -932,7 +961,7 @@ ecma_builtin_list_lazy_property_names (ecma_object_t *object_p, /**< a built-in 
     ecma_length_t index = 0;
     uint32_t *bitset_p = built_in_props_p->instantiated_bitset;
 
-    ecma_collection_header_t *for_non_enumerable_p = (separate_enumerable ? non_enum_collection_p
+    ecma_collection_t *for_non_enumerable_p = (separate_enumerable ? non_enum_collection_p
                                                                           : main_collection_p);
 
     while (curr_property_p->magic_string_id != LIT_MAGIC_STRING__COUNT)
@@ -943,27 +972,31 @@ ecma_builtin_list_lazy_property_names (ecma_object_t *object_p, /**< a built-in 
         index = 0;
       }
 
-#if ENABLED (JERRY_ES2015_BUILTIN_SYMBOL)
+#if ENABLED (JERRY_ES2015)
       /* Builtin symbol properties are internal magic strings which must not be listed */
       if (curr_property_p->magic_string_id > LIT_NON_INTERNAL_MAGIC_STRING__COUNT)
       {
         curr_property_p++;
         continue;
       }
-#endif /* ENABLED (JERRY_ES2015_BUILTIN_SYMBOL) */
+#endif /* ENABLED (JERRY_ES2015) */
 
       ecma_string_t *name_p = ecma_get_magic_string ((lit_magic_string_id_t) curr_property_p->magic_string_id);
 
+      if (is_array_indices_only && ecma_string_get_array_index (name_p) == ECMA_STRING_NOT_ARRAY_INDEX)
+      {
+        curr_property_p++;
+        continue;
+      }
+
       uint32_t bit_for_index = (uint32_t) 1u << index;
 
-      if (!(*bitset_p & bit_for_index) || ecma_op_object_has_own_property (object_p, name_p))
+      if (!(*bitset_p & bit_for_index) || ecma_op_ordinary_object_has_own_property (object_p, name_p))
       {
         ecma_value_t name = ecma_make_magic_string_value ((lit_magic_string_id_t) curr_property_p->magic_string_id);
 
-        ecma_append_to_values_collection (for_non_enumerable_p, name, 0);
+        ecma_collection_push_back (for_non_enumerable_p, name);
       }
-
-      ecma_deref_ecma_string (name_p);
 
       curr_property_p++;
       index++;

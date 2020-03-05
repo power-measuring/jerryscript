@@ -18,11 +18,7 @@
 #include "ecma-iterator-object.h"
 #include "ecma-typedarray-object.h"
 
-#if ENABLED (JERRY_ES2015_BUILTIN_ITERATOR)
-
-#if !ENABLED (JERRY_ES2015_BUILTIN_SYMBOL)
-#error "Iterator builtin requires ES2015 symbol builtin"
-#endif /* !ENABLED (JERRY_ES2015_BUILTIN_SYMBOL) */
+#if ENABLED (JERRY_ES2015)
 
 #define ECMA_BUILTINS_INTERNAL
 #include "ecma-builtins-internal.h"
@@ -66,55 +62,30 @@ ecma_builtin_array_iterator_prototype_object_next (ecma_value_t this_val) /**< t
   ecma_extended_object_t *ext_obj_p = (ecma_extended_object_t *) obj_p;
 
   /* 3. */
-  if (ext_obj_p->u.pseudo_array.type != ECMA_PSEUDO_ARRAY_ITERATOR)
+  if (ecma_get_object_type (obj_p) != ECMA_OBJECT_TYPE_PSEUDO_ARRAY
+      || ext_obj_p->u.pseudo_array.type != ECMA_PSEUDO_ARRAY_ITERATOR)
   {
     return ecma_raise_type_error (ECMA_ERR_MSG ("Argument 'this' is not an iterator."));
   }
 
-  ecma_object_t *array_object_p = ECMA_GET_POINTER (ecma_object_t,
-                                                    ext_obj_p->u.pseudo_array.u2.iterated_value_cp);
-
+  ecma_value_t iterated_value = ext_obj_p->u.pseudo_array.u2.iterated_value;
 
   /* 4 - 5 */
-  if (array_object_p == NULL)
+  if (ecma_is_value_empty (iterated_value))
   {
     return ecma_create_iter_result_object (ECMA_VALUE_UNDEFINED, ECMA_VALUE_TRUE);
   }
 
-  uint32_t length;
+  ecma_object_t *array_object_p = ecma_get_object_from_value (iterated_value);
 
   /* 8 - 9. */
-#if ENABLED (JERRY_ES2015_BUILTIN_TYPEDARRAY)
-  if (ecma_is_typedarray (ecma_make_object_value (array_object_p)))
+  uint32_t length;
+  ecma_value_t len_value = ecma_op_object_get_length (array_object_p, &length);
+
+  if (ECMA_IS_VALUE_ERROR (len_value))
   {
-    length = ecma_typedarray_get_length (array_object_p);
+    return len_value;
   }
-  else
-  {
-#endif /* ENABLED (JERRY_ES2015_BUILTIN_TYPEDARRAY) */
-    ecma_value_t len_value = ecma_op_object_get (array_object_p,
-                                                 ecma_get_magic_string (LIT_MAGIC_STRING_LENGTH));
-
-    if (ECMA_IS_VALUE_ERROR (len_value))
-    {
-      return len_value;
-    }
-
-    ecma_number_t length_number;
-    ecma_value_t length_value = ecma_get_number (len_value, &length_number);
-
-    if (ECMA_IS_VALUE_ERROR (length_value))
-    {
-      ecma_free_value (len_value);
-      return length_value;
-    }
-
-    length = ecma_number_to_uint32 (length_number);
-
-    ecma_free_value (len_value);
-#if ENABLED (JERRY_ES2015_BUILTIN_TYPEDARRAY)
-  }
-#endif /* ENABLED (JERRY_ES2015_BUILTIN_TYPEDARRAY) */
 
   uint32_t index = ext_obj_p->u.pseudo_array.u1.iterator_index;
 
@@ -147,25 +118,21 @@ ecma_builtin_array_iterator_prototype_object_next (ecma_value_t this_val) /**< t
 
   if (index >= length)
   {
-    ECMA_SET_POINTER (ext_obj_p->u.pseudo_array.u2.iterated_value_cp, NULL);
+    ext_obj_p->u.pseudo_array.u2.iterated_value = ECMA_VALUE_EMPTY;
     return ecma_create_iter_result_object (ECMA_VALUE_UNDEFINED, ECMA_VALUE_TRUE);
   }
 
   /* 7. */
   uint8_t iterator_type = ext_obj_p->u.pseudo_array.extra_info;
 
-  if (iterator_type == ECMA_ARRAY_ITERATOR_KEYS)
+  if (iterator_type == ECMA_ITERATOR_KEYS)
   {
     /* 12. */
     return ecma_create_iter_result_object (ecma_make_uint32_value (index), ECMA_VALUE_FALSE);
   }
 
-  /* 13. */
-  ecma_string_t *index_string_p = ecma_new_ecma_string_from_uint32 (index);
-
   /* 14. */
-  ecma_value_t get_value = ecma_op_object_get (array_object_p, index_string_p);
-  ecma_deref_ecma_string (index_string_p);
+  ecma_value_t get_value = ecma_op_object_get_by_uint32_index (array_object_p, index);
 
   /* 15. */
   if (ECMA_IS_VALUE_ERROR (get_value))
@@ -176,14 +143,14 @@ ecma_builtin_array_iterator_prototype_object_next (ecma_value_t this_val) /**< t
   ecma_value_t result;
 
   /* 16. */
-  if (iterator_type == ECMA_ARRAY_ITERATOR_VALUES)
+  if (iterator_type == ECMA_ITERATOR_VALUES)
   {
     result = ecma_create_iter_result_object (get_value, ECMA_VALUE_FALSE);
   }
   else
   {
     /* 17.a */
-    JERRY_ASSERT (iterator_type == ECMA_ARRAY_ITERATOR_KEYS_VALUES);
+    JERRY_ASSERT (iterator_type == ECMA_ITERATOR_KEYS_VALUES);
 
     /* 17.b */
     ecma_value_t entry_array_value;
@@ -205,4 +172,4 @@ ecma_builtin_array_iterator_prototype_object_next (ecma_value_t this_val) /**< t
  * @}
  */
 
-#endif /* ENABLED (JERRY_ES2015_BUILTIN_ITERATOR) */
+#endif /* ENABLED (JERRY_ES2015) */

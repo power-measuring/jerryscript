@@ -32,6 +32,7 @@
  * @{
  */
 
+#include "config.h"
 #include "ecma-globals.h"
 #include "ecma-regexp-object.h"
 #include "jmem.h"
@@ -46,6 +47,7 @@
  */
 typedef enum
 {
+  /* The LEXER_IS_IDENT_OR_STRING macro must be updated if the order is changed. */
   LEXER_IDENT_LITERAL = 0,          /**< identifier literal */
   LEXER_STRING_LITERAL = 1,         /**< string literal */
   LEXER_NUMBER_LITERAL = 2,         /**< number literal */
@@ -53,32 +55,38 @@ typedef enum
   LEXER_REGEXP_LITERAL = 4,         /**< regexp literal */
   LEXER_UNUSED_LITERAL = 5,         /**< unused literal, can only be
                                          used by the byte code generator. */
+  LEXER_NEW_IDENT_LITERAL = 6,      /**< new local variable, can only be
+                                         used by the byte code generator. */
 } lexer_literal_type_t;
+
+/**
+ * Checks whether the literal type is identifier or string.
+ */
+#define LEXER_IS_IDENT_OR_STRING(literal_type) ((literal_type) <= LEXER_STRING_LITERAL)
 
 /**
  * Flag bits for status_flags member of lexer_literal_t.
  */
 typedef enum
 {
-  LEXER_FLAG_VAR = (1 << 0), /**< local identifier (var, function arg) */
-  LEXER_FLAG_NO_REG_STORE = (1 << 1), /**< this local identifier cannot be stored in register */
-  LEXER_FLAG_INITIALIZED = (1 << 2), /**< this local identifier is initialized with a value */
-  LEXER_FLAG_FUNCTION_ARGUMENT = (1 << 3), /**< this local identifier is a function argument */
-  LEXER_FLAG_UNUSED_IDENT = (1 << 4), /**< this identifier is referenced by sub-functions,
-                                       *   but not referenced by the currently parsed function */
-  LEXER_FLAG_SOURCE_PTR = (1 << 5), /**< the literal is directly referenced in the source code
+  LEXER_FLAG_USED = (1 << 0), /**< this local identifier needs to be stored in the constant pool */
+  LEXER_FLAG_FUNCTION_ARGUMENT = (1 << 1), /**< this local identifier is a function argument */
+  LEXER_FLAG_SOURCE_PTR = (1 << 2), /**< the literal is directly referenced in the source code
                                      *   (no need to allocate memory) */
-  LEXER_FLAG_LATE_INIT = (1 << 6), /**< initialize this variable after the byte code is freed */
+  LEXER_FLAG_LATE_INIT = (1 << 3), /**< initialize this variable after the byte code is freed */
+#if ENABLED (JERRY_ES2015)
+  LEXER_FLAG_GLOBAL = (1 << 4), /**< this local identifier is not a let or const declaration */
+#endif /* ENABLED (JERRY_ES2015) */
 } lexer_literal_status_flags_t;
 
 /**
  * Type of property length.
  */
-#ifdef JERRY_CPOINTER_32_BIT
+#if ENABLED (JERRY_CPOINTER_32_BIT)
 typedef uint32_t prop_length_t;
-#else /* !JERRY_CPOINTER_32_BIT */
+#else /* !ENABLED (JERRY_CPOINTER_32_BIT) */
 typedef uint16_t prop_length_t;
-#endif /* JERRY_CPOINTER_32_BIT */
+#endif /* ENABLED (JERRY_CPOINTER_32_BIT) */
 
 /**
  * Literal data.
@@ -93,11 +101,11 @@ typedef struct
     uint32_t source_data;                /**< encoded source literal */
   } u;
 
-#ifdef PARSER_DUMP_BYTE_CODE
+#if ENABLED (JERRY_PARSER_DUMP_BYTE_CODE)
   struct
-#else /* !PARSER_DUMP_BYTE_CODE */
+#else /* !ENABLED (JERRY_PARSER_DUMP_BYTE_CODE) */
   union
-#endif /* PARSER_DUMP_BYTE_CODE */
+#endif /* ENABLED (JERRY_PARSER_DUMP_BYTE_CODE) */
   {
     prop_length_t length;                /**< length of ident / string literal */
     uint16_t index;                      /**< real index during post processing */
@@ -109,9 +117,9 @@ typedef struct
 
 void util_free_literal (lexer_literal_t *literal_p);
 
-#ifdef PARSER_DUMP_BYTE_CODE
+#if ENABLED (JERRY_PARSER_DUMP_BYTE_CODE)
 void util_print_literal (lexer_literal_t *);
-#endif /* PARSER_DUMP_BYTE_CODE */
+#endif /* ENABLED (JERRY_PARSER_DUMP_BYTE_CODE) */
 
 /* TRY/CATCH block */
 

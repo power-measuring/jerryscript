@@ -14,17 +14,21 @@
 
 cmake_minimum_required (VERSION 2.8.12)
 project (unit-doc C)
+find_package(PythonInterp REQUIRED)
 
 set(GEN_DOCTEST "${CMAKE_SOURCE_DIR}/tools/gen-doctest.py")
 file(GLOB DOC_FILES "${CMAKE_SOURCE_DIR}/docs/*.md")
 
-set(COMPILE_FLAGS_DOCTEST "-Wno-unused-parameter -Wno-unused-function -Wno-unused-variable")
+if(NOT (${CMAKE_C_COMPILER_ID} STREQUAL MSVC))
+  set(COMPILE_FLAGS_DOCTEST "-Wno-unused-parameter -Wno-unused-function -Wno-unused-variable")
+endif()
+
 
 # Dry run of the doctest generator: analyze MarkDown files and get the list of
 # file names that will be generated. This allows the definition of proper
 # dependencies between the MarkDown files and the generated sources.
 execute_process(
-  COMMAND ${GEN_DOCTEST} --dry -d ${CMAKE_CURRENT_BINARY_DIR} ${DOC_FILES}
+  COMMAND ${PYTHON_EXECUTABLE} ${GEN_DOCTEST} --dry -d ${CMAKE_CURRENT_BINARY_DIR} ${DOC_FILES}
   OUTPUT_VARIABLE DOCTEST_OUTPUT
   RESULT_VARIABLE GEN_DOCTEST_RESULT
 )
@@ -49,6 +53,16 @@ foreach(DOCTEST_ELEMENT IN LISTS DOCTEST_LIST)
     set(DOCTEST_${DOCTEST_ACTION} ${DOCTEST_${DOCTEST_ACTION}} ${DOCTEST_NAME})
   endif()
 endforeach()
+
+# Disable 02.API-REFERENCE-create-context.c on Windows, because there is no pthread on it.
+if("${PLATFORM}" STREQUAL "WINDOWS")
+  list(REMOVE_ITEM DOCTEST_COMPILE ${CMAKE_CURRENT_BINARY_DIR}/02.API-REFERENCE-create-context.c)
+endif()
+
+# Disable 11.EXT-REFERENCE-AUTORELEASE.c if compiler is MSVC, because MSVC doesn't support cleanup attribute.
+if(USING_MSVC)
+  list(REMOVE_ITEM DOCTEST_COMPILE ${CMAKE_CURRENT_BINARY_DIR}/11.EXT-REFERENCE-AUTORELEASE.c)
+endif()
 
 # Add custom command to run doctest generator if any of the MarkDown sources
 # changes.

@@ -15,7 +15,7 @@
 
 #include "ecma-builtins.h"
 #include "ecma-exceptions.h"
-#include "ecma-map-object.h"
+#include "ecma-container-object.h"
 
 #if ENABLED (JERRY_ES2015_BUILTIN_MAP)
 
@@ -59,8 +59,23 @@ ecma_value_t
 ecma_builtin_map_dispatch_construct (const ecma_value_t *arguments_list_p, /**< arguments list */
                                      ecma_length_t arguments_list_len) /**< number of arguments */
 {
-  return ecma_op_map_create (arguments_list_p, arguments_list_len);
+  return ecma_op_container_create (arguments_list_p,
+                                   arguments_list_len,
+                                   LIT_MAGIC_STRING_MAP_UL,
+                                   ECMA_BUILTIN_ID_MAP_PROTOTYPE);
 } /* ecma_builtin_map_dispatch_construct */
+
+/**
+ * 23.1.2.2 get Map [ @@species ] accessor
+ *
+ * @return ecma_value
+ *         returned value must be freed with ecma_free_value
+ */
+ecma_value_t
+ecma_builtin_map_species_get (ecma_value_t this_value) /**< This Value */
+{
+  return ecma_copy_value (this_value);
+} /* ecma_builtin_map_species_get */
 
 /**
  * @}

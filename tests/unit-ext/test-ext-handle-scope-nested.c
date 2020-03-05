@@ -58,8 +58,8 @@ create_object_nested (int times)
 
   // If leaves `escaped` uninitialized, there will be a style error on linux thrown by compiler
   jerry_value_t escaped = 0;
-  int status = jerryx_escape_handle (scope, obj, &escaped);
-  TEST_ASSERT (status == 0);
+  jerryx_handle_scope_status status = jerryx_escape_handle (scope, obj, &escaped);
+  TEST_ASSERT (status == jerryx_handle_scope_ok);
   TEST_ASSERT (scope->prelist_handle_count == 0);
   TEST_ASSERT (scope->handle_ptr == NULL);
 
@@ -81,7 +81,7 @@ test_handle_scope_val (void)
 
   TEST_ASSERT (jerryx_handle_scope_get_current () == scope);
 
-  jerry_gc (JERRY_GC_SEVERITY_LOW);
+  jerry_gc (JERRY_GC_PRESSURE_LOW);
   TEST_ASSERT (native_free_cb_call_count == 0);
 
   jerryx_close_handle_scope (scope);
@@ -95,7 +95,7 @@ main (void)
   native_free_cb_call_count = 0;
   test_handle_scope_val ();
 
-  jerry_gc (JERRY_GC_SEVERITY_LOW);
+  jerry_gc (JERRY_GC_PRESSURE_LOW);
   TEST_ASSERT (native_free_cb_call_count == 2);
 
   jerry_cleanup ();

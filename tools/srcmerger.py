@@ -28,7 +28,7 @@ class SourceMerger(object):
 
     _RE_INCLUDE = re.compile(r'\s*#include ("|<)(.*?)("|>)\n$')
 
-    def __init__(self, h_files, extra_includes=None, remove_includes=None):
+    def __init__(self, h_files, extra_includes=None, remove_includes=None, add_lineinfo=False):
         self._log = logging.getLogger('sourcemerger')
         self._last_builtin = None
         self._processed = []
@@ -36,6 +36,7 @@ class SourceMerger(object):
         self._h_files = h_files
         self._extra_includes = extra_includes or []
         self._remove_includes = remove_includes
+        self._add_lineinfo = add_lineinfo
         # The copyright will be loaded from the first input file
         self._copyright = {'lines': [], 'loaded': False}
 
@@ -59,15 +60,31 @@ class SourceMerger(object):
         # the line is not anything special, just push it into the output
         self._output.append(line)
 
+    def _emit_lineinfo(self, line_number, filename):
+        if not self._add_lineinfo:
+            return
+
+        normalized_path = repr(os.path.normpath(filename))[1:-1]
+        line_info = '#line %d "%s"\n' % (line_number, normalized_path)
+
+        if self._output and self._output[-1].startswith('#line'):
+            # Avoid emitting multiple line infos in sequence, just overwrite the last one
+            self._output[-1] = line_info
+        else:
+            self._output.append(line_info)
+
     def add_file(self, filename, file_level=0):
         if os.path.basename(filename) in self._processed:
             self._log.warning('Tried to to process an already processed file: "%s"', filename)
             return
 
+        if not file_level:
+            self._log.debug('Adding file: "%s"', filename)
+
         file_level += 1
 
         # mark the start of the new file in the output
-        self._output.append('#line 1 "%s"\n' % (filename))
+        self._emit_lineinfo(1, filename)
 
         line_idx = 0
         with open(filename, 'r') as input_file:
@@ -88,6 +105,8 @@ class SourceMerger(object):
                     if line.strip().endswith('*/'):
                         in_copyright = False
                         self._copyright['loaded'] = True
+                        # emit a line info so the line numbering can be tracked correctly
+                        self._emit_lineinfo(line_idx + 1, filename)
 
                     continue
 
@@ -108,6 +127,8 @@ class SourceMerger(object):
                 if name in self._remove_includes:
                     self._log.debug('[%d] Removing include line (%s:%d): %s',
                                     file_level, filename, line_idx, line.strip())
+                    # emit a line info so the line numbering can be tracked correctly
+                    self._emit_lineinfo(line_idx + 1, filename)
                     continue
 
                 if name not in self._h_files:
@@ -119,14 +140,16 @@ class SourceMerger(object):
                 if name in self._processed:
                     self._log.debug('[%d] Already included: "%s"',
                                     file_level, name)
+                    # emit a line info so the line numbering can be tracked correctly
+                    self._emit_lineinfo(line_idx + 1, filename)
                     continue
 
                 self._log.debug('[%d] Including: "%s"',
                                 file_level, self._h_files[name])
-                self.add_file(self._h_files[name])
+                self.add_file(self._h_files[name], file_level)
 
                 # mark the continuation of the current file in the output
-                self._output.append('#line %d "%s"\n' % (line_idx + 1, filename))
+                self._emit_lineinfo(line_idx + 1, filename)
 
                 if not name.endswith('.inc.h'):
                     # if the included file is not a "*.inc.h" file mark it as processed
@@ -191,18 +214,18 @@ def run_merger(args):
         c_files.pop(name, '')
         h_files.pop(name, '')
 
-    merger = SourceMerger(h_files, args.push_include, args.remove_include)
-    if args.input_file:
-        merger.add_file(args.input_file)
+    merger = SourceMerger(h_files, args.push_include, args.remove_include, args.add_lineinfo)
+    for input_file in args.input_files:
+        merger.add_file(input_file)
 
     if args.append_c_files:
         # if the input file is in the C files list it should be removed to avoid
         # double inclusion of the file
-        if args.input_file:
-            input_name = os.path.basename(args.input_file)
+        for input_file in args.input_files:
+            input_name = os.path.basename(input_file)
             c_files.pop(input_name, '')
 
-        # Add the C files in reverse the order to make sure that builtins are
+        # Add the C files in reverse order to make sure that builtins are
         # not at the beginning.
         for fname in sorted(c_files.values(), reverse=True):
             merger.add_file(fname)
@@ -215,14 +238,16 @@ def main():
     parser = argparse.ArgumentParser(description='Merge source/header files.')
     parser.add_argument('--base-dir', metavar='DIR', type=str, dest='base_dir',
                         help='', default=os.path.curdir)
-    parser.add_argument('--input', metavar='FILE', type=str, dest='input_file',
-                        help='Main input source/header file')
+    parser.add_argument('--input', metavar='FILES', type=str, action='append', dest='input_files',
+                        help='Main input source/header files', default=[])
     parser.add_argument('--output', metavar='FILE', type=str, dest='output_file',
                         help='Output source/header file')
     parser.add_argument('--append-c-files', dest='append_c_files', default=False,
-                        action='store_true', help='das')
+                        action='store_true', help='Enable auto inclusion of c files under the base-dir')
     parser.add_argument('--remove-include', action='append', default=[])
     parser.add_argument('--push-include', action='append', default=[])
+    parser.add_argument('--add-lineinfo', action='store_true', default=False,
+                        help='Enable #line macro insertion into the generated sources')
     parser.add_argument('--verbose', '-v', action='store_true', default=False)
 
     args = parser.parse_args()

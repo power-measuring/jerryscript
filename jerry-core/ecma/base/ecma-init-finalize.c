@@ -30,27 +30,40 @@
  */
 
 /**
+ * Maximum number of GC loops on cleanup.
+ */
+#define JERRY_GC_LOOP_LIMIT 100
+
+/**
  * Initialize ECMA components
  */
 void
 ecma_init (void)
 {
-  ecma_init_global_lex_env ();
+#if (JERRY_GC_MARK_LIMIT != 0)
+  JERRY_CONTEXT (ecma_gc_mark_recursion_limit) = JERRY_GC_MARK_LIMIT;
+#endif /* (JERRY_GC_MARK_LIMIT != 0) */
 
-  jmem_register_free_unused_memory_callback (ecma_free_unused_memory);
+  ecma_init_global_environment ();
 
-#ifndef CONFIG_ECMA_PROPERTY_HASHMAP_DISABLE
+#if ENABLED (JERRY_PROPRETY_HASHMAP)
   JERRY_CONTEXT (ecma_prop_hashmap_alloc_state) = ECMA_PROP_HASHMAP_ALLOC_ON;
-  JERRY_CONTEXT (status_flags) &= (uint32_t) ~ECMA_STATUS_HIGH_SEV_GC;
-#endif /* !CONFIG_ECMA_PROPERTY_HASHMAP_DISABLE */
+  JERRY_CONTEXT (status_flags) &= (uint32_t) ~ECMA_STATUS_HIGH_PRESSURE_GC;
+#endif /* ENABLED (JERRY_PROPRETY_HASHMAP) */
 
-#ifdef VM_RECURSION_LIMIT
-  JERRY_CONTEXT (vm_recursion_counter) = VM_RECURSION_LIMIT;
-#endif /* VM_RECURSION_LIMIT */
+#if (JERRY_STACK_LIMIT != 0)
+  volatile int sp;
+  JERRY_CONTEXT (stack_base) = (uintptr_t)&sp;
+#endif /* (JERRY_STACK_LIMIT != 0) */
 
 #if ENABLED (JERRY_ES2015_BUILTIN_PROMISE)
   ecma_job_queue_init ();
 #endif /* ENABLED (JERRY_ES2015_BUILTIN_PROMISE) */
+
+#if ENABLED (JERRY_ES2015)
+  JERRY_CONTEXT (current_new_target) = JERRY_CONTEXT_INVALID_NEW_TARGET;
+  JERRY_CONTEXT (current_function_obj_p) = NULL;
+#endif /* ENABLED (JERRY_ES2015) */
 } /* ecma_init */
 
 /**
@@ -59,10 +72,23 @@ ecma_init (void)
 void
 ecma_finalize (void)
 {
-  jmem_unregister_free_unused_memory_callback (ecma_free_unused_memory);
-  ecma_finalize_global_lex_env ();
-  ecma_finalize_builtins ();
-  ecma_gc_run (JMEM_FREE_UNUSED_MEMORY_SEVERITY_LOW);
+#if ENABLED (JERRY_ES2015)
+  JERRY_ASSERT (JERRY_CONTEXT (current_new_target) == JERRY_CONTEXT_INVALID_NEW_TARGET);
+  JERRY_ASSERT (JERRY_CONTEXT (current_function_obj_p) == NULL);
+#endif /* ENABLED (JERRY_ES2015) */
+
+  ecma_finalize_global_environment ();
+  uint8_t runs = 0;
+  do
+  {
+    ecma_finalize_builtins ();
+    ecma_gc_run ();
+    if (++runs >= JERRY_GC_LOOP_LIMIT)
+    {
+      jerry_fatal (ERR_UNTERMINATED_GC_LOOPS);
+    }
+  }
+  while (JERRY_CONTEXT (ecma_gc_new_objects) != 0);
   ecma_finalize_lit_storage ();
 } /* ecma_finalize */
 

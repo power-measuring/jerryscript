@@ -35,6 +35,9 @@ JERRY_STATIC_ASSERT (ECMA_VALUE_SHIFT <= JMEM_ALIGNMENT_LOG,
 JERRY_STATIC_ASSERT (sizeof (jmem_cpointer_t) <= sizeof (ecma_value_t),
                      size_of_jmem_cpointer_t_must_be_less_or_equal_to_the_size_of_ecma_value_t);
 
+JERRY_STATIC_ASSERT (sizeof (jmem_cpointer_t) <= sizeof (jmem_cpointer_tag_t),
+                     size_of_jmem_cpointer_t_must_be_less_or_equal_to_the_size_of_jmem_cpointer_tag_t);
+
 #ifdef ECMA_VALUE_CAN_STORE_UINTPTR_VALUE_DIRECTLY
 
 JERRY_STATIC_ASSERT (sizeof (uintptr_t) <= sizeof (ecma_value_t),
@@ -63,7 +66,7 @@ JERRY_STATIC_ASSERT ((ECMA_VALUE_FALSE | (1 << ECMA_DIRECT_SHIFT)) == ECMA_VALUE
  *
  * @return type field
  */
-static inline ecma_type_t JERRY_ATTR_CONST JERRY_ATTR_ALWAYS_INLINE
+extern inline ecma_type_t JERRY_ATTR_CONST JERRY_ATTR_ALWAYS_INLINE
 ecma_get_value_type_field (ecma_value_t value) /**< ecma value */
 {
   return value & ECMA_VALUE_TYPE_MASK;
@@ -289,7 +292,7 @@ ecma_is_value_float_number (ecma_value_t value) /**< ecma value */
  * @return true - if the value contains ecma-number value,
  *         false - otherwise
  */
-inline bool JERRY_ATTR_CONST JERRY_ATTR_ALWAYS_INLINE
+extern inline bool JERRY_ATTR_CONST JERRY_ATTR_ALWAYS_INLINE
 ecma_is_value_number (ecma_value_t value) /**< ecma value */
 {
   return (ecma_is_value_integer_number (value)
@@ -305,13 +308,13 @@ JERRY_STATIC_ASSERT ((ECMA_TYPE_STRING | 0x4) == ECMA_TYPE_DIRECT_STRING,
  * @return true - if the value contains ecma-string value,
  *         false - otherwise
  */
-inline bool JERRY_ATTR_CONST JERRY_ATTR_ALWAYS_INLINE
+extern inline bool JERRY_ATTR_CONST JERRY_ATTR_ALWAYS_INLINE
 ecma_is_value_string (ecma_value_t value) /**< ecma value */
 {
   return ((value & (ECMA_VALUE_TYPE_MASK - 0x4)) == ECMA_TYPE_STRING);
 } /* ecma_is_value_string */
 
-#if ENABLED (JERRY_ES2015_BUILTIN_SYMBOL)
+#if ENABLED (JERRY_ES2015)
 /**
  * Check if the value is symbol.
  *
@@ -323,7 +326,7 @@ ecma_is_value_symbol (ecma_value_t value) /**< ecma value */
 {
   return (ecma_get_value_type_field (value) == ECMA_TYPE_SYMBOL);
 } /* ecma_is_value_symbol */
-#endif /* ENABLED (JERRY_ES2015_BUILTIN_SYMBOL) */
+#endif /* ENABLED (JERRY_ES2015) */
 
 /**
  * Check if the value can be property name.
@@ -334,11 +337,11 @@ ecma_is_value_symbol (ecma_value_t value) /**< ecma value */
 inline bool JERRY_ATTR_CONST JERRY_ATTR_ALWAYS_INLINE
 ecma_is_value_prop_name (ecma_value_t value) /**< ecma value */
 {
-#if ENABLED (JERRY_ES2015_BUILTIN_SYMBOL)
+#if ENABLED (JERRY_ES2015)
   return ecma_is_value_string (value) || ecma_is_value_symbol (value);
-#else /* !ENABLED (JERRY_ES2015_BUILTIN_SYMBOL) */
+#else /* !ENABLED (JERRY_ES2015) */
   return ecma_is_value_string (value);
-#endif /* ENABLED (JERRY_ES2015_BUILTIN_SYMBOL) */
+#endif /* ENABLED (JERRY_ES2015) */
 } /* ecma_is_value_prop_name */
 
 /**
@@ -390,18 +393,6 @@ ecma_is_value_error_reference (ecma_value_t value) /**< ecma value */
 } /* ecma_is_value_error_reference */
 
 /**
- * Check if the value is an aligned pointer.
- *
- * @return true - if the value contains an aligned pointer,
- *         false - otherwise
- */
-inline bool JERRY_ATTR_CONST JERRY_ATTR_ALWAYS_INLINE
-ecma_is_value_pointer (ecma_value_t value) /**< ecma value */
-{
-  return (ecma_get_value_type_field (value) == ECMA_TYPE_POINTER);
-} /* ecma_is_value_pointer */
-
-/**
  * Debug assertion that specified value's type is one of ECMA-defined
  * script-visible types, i.e.: undefined, null, boolean, number, string, object.
  */
@@ -416,6 +407,19 @@ ecma_check_value_type_is_spec_defined (ecma_value_t value) /**< ecma value */
                 || ECMA_ASSERT_VALUE_IS_SYMBOL (value)
                 || ecma_is_value_object (value));
 } /* ecma_check_value_type_is_spec_defined */
+
+/**
+ * Checks if the given argument is an array or not.
+ *
+ * @return true - if the given argument is an array object
+ *         false - otherwise
+ */
+inline bool JERRY_ATTR_CONST JERRY_ATTR_ALWAYS_INLINE
+ecma_is_value_array (ecma_value_t arg) /**< argument */
+{
+  return (ecma_is_value_object (arg)
+          && ecma_get_object_type (ecma_get_object_from_value (arg)) == ECMA_OBJECT_TYPE_ARRAY);
+} /* ecma_is_value_array */
 
 /**
  * Creates an ecma value from the given raw boolean.
@@ -460,11 +464,22 @@ ecma_create_float_number (ecma_number_t ecma_number) /**< value of the float num
 } /* ecma_create_float_number */
 
 /**
+ * Encode float number without checks.
+ *
+ * @return ecma-value
+ */
+ecma_value_t
+ecma_make_float_value (ecma_number_t *ecma_num_p) /**< pointer to the float number */
+{
+  return ecma_pointer_to_ecma_value (ecma_num_p) | ECMA_TYPE_FLOAT;
+} /* ecma_make_float_value */
+
+/**
  * Create a new NaN value.
  *
  * @return ecma-value
  */
-inline ecma_value_t JERRY_ATTR_ALWAYS_INLINE
+extern inline ecma_value_t JERRY_ATTR_ALWAYS_INLINE
 ecma_make_nan_value (void)
 {
   return ecma_create_float_number (ecma_number_make_nan ());
@@ -478,26 +493,12 @@ ecma_make_nan_value (void)
 static inline bool JERRY_ATTR_CONST JERRY_ATTR_ALWAYS_INLINE
 ecma_is_number_equal_to_positive_zero (ecma_number_t ecma_number) /**< number */
 {
+  ecma_number_accessor_t u;
+  u.as_ecma_number_t = ecma_number;
 #if !ENABLED (JERRY_NUMBER_TYPE_FLOAT64)
-  union
-  {
-    uint32_t u32_value;
-    ecma_number_t float_value;
-  } u;
-
-  u.float_value = ecma_number;
-
-  return u.u32_value == 0;
+  return u.as_uint32_t == 0;
 #else /* ENABLED (JERRY_NUMBER_TYPE_FLOAT64) */
-  union
-  {
-    uint64_t u64_value;
-    ecma_number_t float_value;
-  } u;
-
-  u.float_value = ecma_number;
-
-  return u.u64_value == 0;
+  return u.as_uint64_t == 0;
 #endif /* !ENABLED (JERRY_NUMBER_TYPE_FLOAT64) */
 } /* ecma_is_number_equal_to_positive_zero */
 
@@ -562,9 +563,9 @@ inline ecma_value_t JERRY_ATTR_PURE JERRY_ATTR_ALWAYS_INLINE
 ecma_make_string_value (const ecma_string_t *ecma_string_p) /**< string to reference in value */
 {
   JERRY_ASSERT (ecma_string_p != NULL);
-#if ENABLED (JERRY_ES2015_BUILTIN_SYMBOL)
+#if ENABLED (JERRY_ES2015)
   JERRY_ASSERT (!ecma_prop_name_is_symbol ((ecma_string_t *) ecma_string_p));
-#endif /* ENABLED (JERRY_ES2015_BUILTIN_SYMBOL) */
+#endif /* ENABLED (JERRY_ES2015) */
 
   if ((((uintptr_t) ecma_string_p) & ECMA_VALUE_TYPE_MASK) != 0)
   {
@@ -574,7 +575,7 @@ ecma_make_string_value (const ecma_string_t *ecma_string_p) /**< string to refer
   return ecma_pointer_to_ecma_value (ecma_string_p) | ECMA_TYPE_STRING;
 } /* ecma_make_string_value */
 
-#if ENABLED (JERRY_ES2015_BUILTIN_SYMBOL)
+#if ENABLED (JERRY_ES2015)
 /**
  * Symbol value constructor
  *
@@ -588,7 +589,7 @@ ecma_make_symbol_value (const ecma_string_t *ecma_symbol_p) /**< symbol to refer
 
   return ecma_pointer_to_ecma_value (ecma_symbol_p) | ECMA_TYPE_SYMBOL;
 } /* ecma_make_symbol_value */
-#endif /* ENABLED (JERRY_ES2015_BUILTIN_SYMBOL) */
+#endif /* ENABLED (JERRY_ES2015) */
 
 /**
  * Property-name value constructor
@@ -600,12 +601,12 @@ ecma_make_prop_name_value (const ecma_string_t *ecma_prop_name_p) /**< property 
 {
   JERRY_ASSERT (ecma_prop_name_p != NULL);
 
-#if ENABLED (JERRY_ES2015_BUILTIN_SYMBOL)
+#if ENABLED (JERRY_ES2015)
   if (ecma_prop_name_is_symbol ((ecma_string_t *) ecma_prop_name_p))
   {
     return ecma_make_symbol_value (ecma_prop_name_p);
   }
-#endif /* ENABLED (JERRY_ES2015_BUILTIN_SYMBOL) */
+#endif /* ENABLED (JERRY_ES2015) */
 
   return ecma_make_string_value (ecma_prop_name_p);
 } /* ecma_make_prop_name_value */
@@ -648,29 +649,6 @@ ecma_make_error_reference_value (const ecma_error_reference_t *error_ref_p) /**<
 } /* ecma_make_error_reference_value */
 
 /**
- * Create an ecma value from an aligned pointer
- *
- * @return ecma-value representation of the aligned pointer
- */
-inline ecma_value_t JERRY_ATTR_PURE JERRY_ATTR_ALWAYS_INLINE
-ecma_make_pointer_value (const void *any_p) /**< any aligned pointer */
-{
-#ifdef ECMA_VALUE_CAN_STORE_UINTPTR_VALUE_DIRECTLY
-
-  uintptr_t uint_ptr = (uintptr_t) any_p;
-  JERRY_ASSERT ((uint_ptr & ECMA_VALUE_TYPE_MASK) == 0);
-  return ((ecma_value_t) uint_ptr) | ECMA_TYPE_POINTER;
-
-#else /* !ECMA_VALUE_CAN_STORE_UINTPTR_VALUE_DIRECTLY */
-
-  jmem_cpointer_t ptr_cp;
-  ECMA_SET_POINTER (ptr_cp, any_p);
-  return (((ecma_value_t) ptr_cp) << ECMA_VALUE_SHIFT) | ECMA_TYPE_POINTER;
-
-#endif /* ECMA_VALUE_CAN_STORE_UINTPTR_VALUE_DIRECTLY */
-} /* ecma_make_pointer_value */
-
-/**
  * Get integer value from an integer ecma value
  *
  * @return integer value
@@ -695,6 +673,19 @@ ecma_get_float_from_value (ecma_value_t value) /**< ecma value */
 
   return *(ecma_number_t *) ecma_get_pointer_from_ecma_value (value);
 } /* ecma_get_float_from_value */
+
+/**
+ * Get floating point value pointer from an ecma value
+ *
+ * @return floating point value
+ */
+inline ecma_number_t * JERRY_ATTR_PURE JERRY_ATTR_ALWAYS_INLINE
+ecma_get_pointer_from_float_value (ecma_value_t value) /**< ecma value */
+{
+  JERRY_ASSERT (ecma_get_value_type_field (value) == ECMA_TYPE_FLOAT);
+
+  return (ecma_number_t *) ecma_get_pointer_from_ecma_value (value);
+} /* ecma_get_pointer_from_float_value */
 
 /**
  * Get floating point value from an ecma value
@@ -730,7 +721,7 @@ ecma_get_string_from_value (ecma_value_t value) /**< ecma value */
   return (ecma_string_t *) ecma_get_pointer_from_ecma_value (value);
 } /* ecma_get_string_from_value */
 
-#if ENABLED (JERRY_ES2015_BUILTIN_SYMBOL)
+#if ENABLED (JERRY_ES2015)
 /**
  * Get pointer to ecma-string from ecma value
  *
@@ -743,7 +734,7 @@ ecma_get_symbol_from_value (ecma_value_t value) /**< ecma value */
 
   return (ecma_string_t *) ecma_get_pointer_from_ecma_value (value);
 } /* ecma_get_symbol_from_value */
-#endif /* ENABLED (JERRY_ES2015_BUILTIN_SYMBOL) */
+#endif /* ENABLED (JERRY_ES2015) */
 
 /**
  * Get pointer to a property name from ecma value
@@ -790,23 +781,6 @@ ecma_get_error_reference_from_value (ecma_value_t value) /**< ecma value */
 } /* ecma_get_error_reference_from_value */
 
 /**
- * Get an aligned pointer from an ecma value
- *
- * @return pointer value
- */
-inline void * JERRY_ATTR_PURE JERRY_ATTR_ALWAYS_INLINE
-ecma_get_pointer_from_value (ecma_value_t value) /**< ecma value */
-{
-  JERRY_ASSERT (ecma_get_value_type_field (value) == ECMA_TYPE_POINTER);
-
-#ifdef ECMA_VALUE_CAN_STORE_UINTPTR_VALUE_DIRECTLY
-  return (void *) (uintptr_t) ((value) & ~ECMA_VALUE_TYPE_MASK);
-#else /* !ECMA_VALUE_CAN_STORE_UINTPTR_VALUE_DIRECTLY */
-  return ECMA_GET_POINTER (void, value >> ECMA_VALUE_SHIFT);
-#endif /* ECMA_VALUE_CAN_STORE_UINTPTR_VALUE_DIRECTLY */
-} /* ecma_get_pointer_from_value */
-
-/**
  * Invert a boolean value
  *
  * @return ecma value
@@ -840,13 +814,13 @@ ecma_copy_value (ecma_value_t value)  /**< value description */
       ecma_ref_ecma_string (ecma_get_string_from_value (value));
       return value;
     }
-#if ENABLED (JERRY_ES2015_BUILTIN_SYMBOL)
+#if ENABLED (JERRY_ES2015)
     case ECMA_TYPE_SYMBOL:
     {
       ecma_ref_ecma_string (ecma_get_symbol_from_value (value));
       return value;
     }
-#endif /* ENABLED (JERRY_ES2015_BUILTIN_SYMBOL) */
+#endif /* ENABLED (JERRY_ES2015) */
     case ECMA_TYPE_OBJECT:
     {
       ecma_ref_object (ecma_get_object_from_value (value));
@@ -884,16 +858,40 @@ ecma_fast_copy_value (ecma_value_t value)  /**< value description */
  *
  * @return copy of the given value
  */
-ecma_value_t
+inline ecma_value_t JERRY_ATTR_ALWAYS_INLINE
 ecma_copy_value_if_not_object (ecma_value_t value) /**< value description */
 {
-  if (ecma_get_value_type_field (value) != ECMA_TYPE_OBJECT)
+  if (!ecma_is_value_object (value))
   {
     return ecma_copy_value (value);
   }
 
   return value;
 } /* ecma_copy_value_if_not_object */
+
+/**
+ * Increase reference counter of a value if it is an object.
+ */
+inline void JERRY_ATTR_ALWAYS_INLINE
+ecma_ref_if_object (ecma_value_t value) /**< value description */
+{
+  if (ecma_is_value_object (value))
+  {
+    ecma_ref_object (ecma_get_object_from_value (value));
+  }
+} /* ecma_ref_if_object */
+
+/**
+ * Decrease reference counter of a value if it is an object.
+ */
+inline void JERRY_ATTR_ALWAYS_INLINE
+ecma_deref_if_object (ecma_value_t value) /**< value description */
+{
+  if (ecma_is_value_object (value))
+  {
+    ecma_deref_object (ecma_get_object_from_value (value));
+  }
+} /* ecma_deref_if_object */
 
 /**
  * Assign a new value to an ecma-value
@@ -1037,13 +1035,13 @@ ecma_free_value (ecma_value_t value) /**< value description */
       ecma_deref_ecma_string (string_p);
       break;
     }
-#if ENABLED (JERRY_ES2015_BUILTIN_SYMBOL)
+#if ENABLED (JERRY_ES2015)
     case ECMA_TYPE_SYMBOL:
     {
       ecma_deref_ecma_string (ecma_get_symbol_from_value (value));
       break;
     }
-#endif /* ENABLED (JERRY_ES2015_BUILTIN_SYMBOL) */
+#endif /* ENABLED (JERRY_ES2015) */
     case ECMA_TYPE_OBJECT:
     {
       ecma_deref_object (ecma_get_object_from_value (value));
@@ -1143,12 +1141,12 @@ ecma_get_typeof_lit_id (ecma_value_t value) /**< input ecma value */
   {
     ret_value = LIT_MAGIC_STRING_STRING;
   }
-#if ENABLED (JERRY_ES2015_BUILTIN_SYMBOL)
+#if ENABLED (JERRY_ES2015)
   else if (ecma_is_value_symbol (value))
   {
     ret_value = LIT_MAGIC_STRING_SYMBOL;
   }
-#endif /* ENABLED (JERRY_ES2015_BUILTIN_SYMBOL) */
+#endif /* ENABLED (JERRY_ES2015) */
   else
   {
     JERRY_ASSERT (ecma_is_value_object (value));
