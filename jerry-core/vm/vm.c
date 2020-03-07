@@ -4363,8 +4363,9 @@ vm_run (const ecma_compiled_code_t *bytecode_header_p, /**< byte-code data heade
   frame_ctx_p->this_binding = this_binding_value;
 
   vm_init_exec (frame_ctx_p, arg_list_p, arg_list_len);
-  return vm_execute (frame_ctx_p);
+  ecma_value_t ret = vm_execute (frame_ctx_p);
   myinst(0, 0);
+  return ret;
 } /* vm_run */
 
 /**
