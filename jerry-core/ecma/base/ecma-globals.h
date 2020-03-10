@@ -764,6 +764,11 @@ typedef enum
  */
 typedef struct
 {
+    //visit frequency of an object
+    int visit_freq;
+    //value: 0, 1
+    int disable_hashmap;
+    
   /** type : 4 bit : ecma_object_type_t or ecma_lexical_environment_type_t
                      depending on ECMA_OBJECT_FLAG_BUILT_IN_OR_LEXICAL_ENV
       flags : 2 bit : ECMA_OBJECT_FLAG_BUILT_IN_OR_LEXICAL_ENV,

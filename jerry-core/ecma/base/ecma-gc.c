@@ -1553,7 +1553,10 @@ ecma_free_unused_memory (jmem_pressure_t pressure) /**< current pressure */
 
           if (prop_iter_p->types[0] == ECMA_PROPERTY_TYPE_HASHMAP)
           {
-            ecma_property_hashmap_free (obj_iter_p);
+            if(obj_iter_p->visit_freq < 100){
+                ecma_property_hashmap_free (obj_iter_p);
+                obj_iter_p->disable_hashmap = 1;
+            }
           }
         }
 

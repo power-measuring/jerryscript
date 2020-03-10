@@ -77,7 +77,7 @@ ecma_create_object (ecma_object_t *prototype_object_p, /**< pointer to prototybe
                     ecma_object_type_t type) /**< object type */
 {
   ecma_object_t *new_object_p;
-
+  
   if (ext_object_size > 0)
   {
     new_object_p = (ecma_object_t *) ecma_alloc_extended_object (ext_object_size);
@@ -86,7 +86,9 @@ ecma_create_object (ecma_object_t *prototype_object_p, /**< pointer to prototybe
   {
     new_object_p = ecma_alloc_object ();
   }
-
+  
+  new_object_p->visit_freq = 0;
+  new_object_p->disable_hashmap = 0;
   new_object_p->type_flags_refs = (uint16_t) (type | ECMA_OBJECT_FLAG_EXTENSIBLE);
 
   ecma_init_gc_info (new_object_p);
@@ -588,6 +590,7 @@ ecma_find_named_property (ecma_object_t *obj_p, /**< object to find property in 
                 || !ecma_op_object_is_fast_array (obj_p));
 
   ecma_property_t *property_p = NULL;
+  obj_p->visit_freq += 1;
 
 #if ENABLED (JERRY_LCACHE)
   myinst(5, 1); 
@@ -722,7 +725,9 @@ ecma_find_named_property (ecma_object_t *obj_p, /**< object to find property in 
 #if ENABLED (JERRY_PROPRETY_HASHMAP)
   if (steps >= (ECMA_PROPERTY_HASMAP_MINIMUM_SIZE / 2))
   {
-    ecma_property_hashmap_create (obj_p);
+    if(obj_p->disable_hashmap == 0){
+       ecma_property_hashmap_create (obj_p);
+    }
   }
 #endif /* ENABLED (JERRY_PROPRETY_HASHMAP) */
 
