@@ -630,7 +630,7 @@ ecma_find_named_property (ecma_object_t *obj_p, /**< object to find property in 
     }
   }
 #endif /* ENABLED (JERRY_PROPRETY_HASHMAP) */
-
+  myinst(6, 0);
   myinst(7, 1);
 #if ENABLED (JERRY_PROPRETY_HASHMAP)
   uint32_t steps = 0;
