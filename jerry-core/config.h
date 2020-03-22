@@ -134,7 +134,7 @@
  * For more details see: jmem/jmem.h
  */
 #ifndef JERRY_CPOINTER_32_BIT
-# define JERRY_CPOINTER_32_BIT 1
+# define JERRY_CPOINTER_32_BIT 0
 #endif /* !defined (JERRY_CPOINTER_32_BIT) */
 
 /**

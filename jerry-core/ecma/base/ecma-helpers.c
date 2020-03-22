@@ -625,11 +625,8 @@ ecma_find_named_property (ecma_object_t *obj_p, /**< object to find property in 
       }
       myinst(6, 0);
 #endif /* ENABLED (JERRY_LCACHE) */
-      if (property_p != NULL)
-      {
-        myinst(4, 0);
-        return property_p;
-      }
+      myinst(4, 0);
+      return property_p;
     }
   }
 #endif /* ENABLED (JERRY_PROPRETY_HASHMAP) */
@@ -653,7 +650,7 @@ ecma_find_named_property (ecma_object_t *obj_p, /**< object to find property in 
                                                                        prop_iter_cp);
 
       JERRY_ASSERT (ECMA_PROPERTY_IS_PROPERTY_PAIR (prop_iter_p));
-
+      
       ecma_property_pair_t *prop_pair_p = (ecma_property_pair_t *) prop_iter_p;
 
       if (prop_pair_p->names_cp[0] == property_name_cp
