@@ -622,11 +622,8 @@ ecma_find_named_property (ecma_object_t *obj_p, /**< object to find property in 
       }
       myinst(6, 0);
 #endif /* ENABLED (JERRY_LCACHE) */
-      if (property_p != NULL)
-      {
-        myinst(4, 0);
-        return property_p;
-      }
+      myinst(4, 0);
+      return property_p;
     }
   }
 #endif /* ENABLED (JERRY_PROPRETY_HASHMAP) */
